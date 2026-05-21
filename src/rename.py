@@ -7,10 +7,17 @@ transcription pipeline beyond the JSON segment shape.
 """
 from __future__ import annotations
 
+import json
+import logging
 import re
 from dataclasses import dataclass, field
+from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 _DEFAULT_SPEAKER_RE = re.compile(r"^SPEAKER_\d+$")
+
+PERSIST_VERSION = 1
 
 
 @dataclass
@@ -90,3 +97,45 @@ def unmapped_speakers(segments: list[dict]) -> list[str]:
         if isinstance(spk, str) and _DEFAULT_SPEAKER_RE.match(spk):
             seen.setdefault(spk, None)
     return list(seen.keys())
+
+
+def _persist_path(transcript_dir: Path, stem: str) -> Path:
+    return transcript_dir / f"{stem}.speakers.json"
+
+
+def load_persisted_mapping(transcript_dir: Path, stem: str) -> dict[str, str] | None:
+    """Read `<stem>.speakers.json` from `transcript_dir`. Returns the mapping,
+    or None if the file is missing/unreadable/wrong-version.
+    """
+    path = _persist_path(transcript_dir, stem)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        log.warning("Could not read persisted mapping %s: %s", path, e)
+        return None
+    if data.get("version") != PERSIST_VERSION:
+        log.warning("Unknown persisted-mapping version in %s; ignoring.", path)
+        return None
+    mapping = data.get("mapping")
+    if not isinstance(mapping, dict):
+        return None
+    return {str(k): str(v) for k, v in mapping.items()}
+
+
+def save_persisted_mapping(
+    transcript_dir: Path,
+    stem: str,
+    audio_filename: str,
+    mapping: dict[str, str],
+) -> None:
+    """Write `<stem>.speakers.json` next to the transcript outputs."""
+    transcript_dir.mkdir(parents=True, exist_ok=True)
+    path = _persist_path(transcript_dir, stem)
+    payload = {
+        "version": PERSIST_VERSION,
+        "audio_filename": audio_filename,
+        "mapping": dict(mapping),
+    }
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
