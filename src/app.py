@@ -114,6 +114,10 @@ class LiveState:
     completed_stages: set[str] = field(default_factory=set)
     current_started: float | None = None
     frame: int = 0
+    # REVIEW stage state — armed when on_review is waiting on a keypress.
+    review_examples: list[Any] | None = None   # list[SpeakerExample]
+    review_deadline: float | None = None       # monotonic deadline
+    rename_pending: list[Row] = field(default_factory=list)
     lock: Lock = field(default_factory=Lock)
 
     def begin_file(self, row: Row) -> None:
@@ -135,6 +139,8 @@ class LiveState:
             self.current_stage_progress = 0.0
             self.completed_stages = set()
             self.current_started = None
+            self.review_examples = None
+            self.review_deadline = None
 
     def on_stage(self, stage: str, info: dict[str, Any]) -> None:
         with self.lock:
@@ -183,6 +189,11 @@ def render(state: LiveState, cfg: Config) -> Group:
         completed = set(state.completed_stages)
         rows_snapshot = list(state.rows)
         frame = state.frame
+        review_deadline = state.review_deadline
+
+    review_seconds_remaining = None
+    if review_deadline is not None:
+        review_seconds_remaining = max(0.0, review_deadline - time.monotonic())
 
     done = sum(1 for r in rows_snapshot if r.status == DONE)
     failed = sum(1 for r in rows_snapshot if r.status == FAILED)
@@ -203,6 +214,7 @@ def render(state: LiveState, cfg: Config) -> Group:
             elapsed_s=elapsed,
             frame=frame,
             stages=STAGES,
+            review_seconds_remaining=review_seconds_remaining,
         ),
         ui.queue_table(rows_snapshot),
         ui.batch_progress(done, failed, total_actionable),
