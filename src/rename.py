@@ -139,3 +139,52 @@ def save_persisted_mapping(
         "mapping": dict(mapping),
     }
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+@dataclass
+class RenamePending:
+    transcript_json: Path
+    audio_path: Path | None
+    unmapped: list[str]
+
+
+def _find_audio_for_stem(incoming_dir: Path, stem: str) -> Path | None:
+    # Local import to avoid pulling whisperx into the import graph for tests
+    # that only exercise pure-data helpers.
+    from src.transcribe import AUDIO_EXTS
+
+    if not incoming_dir.exists():
+        return None
+    for candidate in incoming_dir.rglob(f"{stem}.*"):
+        if candidate.suffix.lower() in AUDIO_EXTS:
+            return candidate
+    return None
+
+
+def find_rename_pending(
+    transcripts_dir: Path,
+    incoming_dir: Path,
+) -> list[RenamePending]:
+    """Walk `transcripts_dir` for JSON transcripts that still contain default
+    `SPEAKER_\\d+` labels. For each, also look up the original audio file in
+    `incoming_dir` (used for snippet playback)."""
+    if not transcripts_dir.exists():
+        return []
+    pending: list[RenamePending] = []
+    for json_path in sorted(transcripts_dir.rglob("*.json")):
+        if json_path.name.endswith(".speakers.json"):
+            continue
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        segments = data.get("segments") or []
+        labels = unmapped_speakers(segments)
+        if not labels:
+            continue
+        pending.append(RenamePending(
+            transcript_json=json_path,
+            audio_path=_find_audio_for_stem(incoming_dir, json_path.stem),
+            unmapped=labels,
+        ))
+    return pending
