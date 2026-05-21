@@ -281,6 +281,75 @@ def run_one(
         state.end_file()
 
 
+def _run_rename_for_transcript(
+    transcript_json: Path,
+    audio_path: Path | None,
+    cfg: Config,
+    *,
+    ffplay_avail: bool,
+) -> None:
+    """Post-hoc rename for a single transcript. Used by both
+    post-batch catch-up and the startup `r` option.
+    """
+    from . import rename
+
+    stem = transcript_json.stem
+    out_dir = transcript_json.parent
+
+    if not transcript_json.exists():
+        console.print(f"[{ui.NEON_RED}]Transcript missing: {transcript_json}[/{ui.NEON_RED}]")
+        return
+
+    data = json.loads(transcript_json.read_text(encoding="utf-8"))
+    segments = data.get("segments") or []
+    persisted = rename.load_persisted_mapping(out_dir, stem)
+    if persisted:
+        rename.apply_speaker_mapping(segments, persisted)
+
+    remaining = rename.unmapped_speakers(segments)
+    if not remaining:
+        console.print(f"[{ui.DIM}]{stem}: nothing to rename.[/{ui.DIM}]")
+        return
+
+    examples = [e for e in rename.build_speaker_examples(segments) if e.label in remaining]
+    audio_for_play = audio_path if (audio_path and audio_path.exists()) else None
+    console.rule(f"[{ui.NEON_MAGENTA} bold]Renaming {stem}[/{ui.NEON_MAGENTA} bold]")
+    mapping = rename.interactive_rename(
+        examples, audio_for_play, console,
+        ffplay_available=ffplay_avail and audio_for_play is not None,
+    )
+    if not mapping:
+        return
+
+    merged = dict(persisted or {})
+    merged.update(mapping)
+    audio_filename = audio_path.name if audio_path else f"{stem}.audio"
+    rename.save_persisted_mapping(out_dir, stem, audio_filename, merged)
+    rename.rewrite_outputs_with_mapping(transcript_json, merged)
+    console.print(f"[{ui.NEON_GREEN}]✓ Rewrote outputs for {stem}.[/{ui.NEON_GREEN}]")
+
+
+def _post_batch_catchup(state: LiveState, cfg: Config, *, ffplay_avail: bool) -> None:
+    """Prompt to name remaining unnamed speakers across just-finished batch."""
+    pending = list(state.rename_pending)
+    state.rename_pending.clear()
+    if not pending:
+        return
+
+    prompt_msg = (f"\n[bold]{len(pending)} file(s) still have unnamed speakers. "
+                  f"Rename now?[/bold] "
+                  f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es / "
+                  f"[[{ui.DIM}]n[/{ui.DIM}]]o")
+    choice = Prompt.ask(prompt_msg, default="y", show_default=False).strip().lower()
+    if choice in ("n", "no"):
+        return
+
+    for row in pending:
+        stem = row.path.stem
+        transcript_json = cfg.transcripts_dir / stem / f"{stem}.json"
+        _run_rename_for_transcript(transcript_json, row.path, cfg, ffplay_avail=ffplay_avail)
+
+
 def _make_on_review(
     state: LiveState,
     live: "Live",
@@ -498,6 +567,12 @@ def main(argv: list[str] | None = None) -> int:
     new = [r for r in state.rows if r.status == PENDING]
     skipped = [r for r in state.rows if r.status == SKIPPED]
 
+    rename_pending_existing = rename.find_rename_pending(cfg.transcripts_dir, cfg.incoming_dir)
+    rename_chip = (
+        f" / [[{ui.NEON_GREEN}]r[/{ui.NEON_GREEN}]]ename pending ({len(rename_pending_existing)})"
+        if rename_pending_existing else ""
+    )
+
     if args.force:
         for r in state.rows:
             r.status = PENDING
@@ -510,30 +585,41 @@ def main(argv: list[str] | None = None) -> int:
         if new and skipped:
             prompt = (f"\n[bold]Transcribe {len(new)} new?[/bold]  "
                       f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es / "
-                      f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force / "
-                      f"[[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+                      f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force"
+                      f"{rename_chip}"
+                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
                       f"[[{ui.DIM}]q[/{ui.DIM}]]uit")
             default = "y"
         elif new:
             prompt = (f"\n[bold]Transcribe {len(new)} new?[/bold]  "
-                      f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es / "
-                      f"[[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+                      f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es"
+                      f"{rename_chip}"
+                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
                       f"[[{ui.DIM}]q[/{ui.DIM}]]uit")
             default = "y"
         elif skipped:
             prompt = (f"\nAll caught up. "
-                      f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force / "
-                      f"[[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+                      f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force"
+                      f"{rename_chip}"
+                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
                       f"[[{ui.DIM}]Q[/{ui.DIM}]]uit")
             default = "q"
         else:
-            prompt = (f"\nNothing here. "
-                      f"[[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+            prompt = (f"\nNothing here."
+                      f"{rename_chip}"
+                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
                       f"[[{ui.DIM}]Q[/{ui.DIM}]]uit")
             default = "q"
 
         choice = Prompt.ask(prompt, default=default, show_default=False).strip().lower()
         if choice in ("q", "n", ""):
+            return 0
+        if choice == "r" and rename_pending_existing:
+            for p in rename_pending_existing:
+                _run_rename_for_transcript(
+                    p.transcript_json, p.audio_path, cfg,
+                    ffplay_avail=ffplay_avail,
+                )
             return 0
         if choice == "a":
             for r in state.rows:
@@ -549,6 +635,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if to_run:
         process_batch(to_run, state, cfg, args=args, ffplay_avail=ffplay_avail)
+        if state.rename_pending and not args.no_review:
+            _post_batch_catchup(state, cfg, ffplay_avail=ffplay_avail)
 
     failed = sum(1 for r in state.rows if r.status == FAILED)
 
