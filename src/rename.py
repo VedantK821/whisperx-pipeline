@@ -161,6 +161,24 @@ def _find_audio_for_stem(incoming_dir: Path, stem: str) -> Path | None:
     return None
 
 
+def rewrite_outputs_with_mapping(
+    transcript_json: Path,
+    mapping: dict[str, str],
+) -> None:
+    """Load a transcript JSON, apply the mapping, and re-emit
+    `.json`, `.txt`, and `.srt` next to it. Used for post-hoc renames
+    (post-batch catch-up and the startup `r` option).
+    """
+    # Local import to keep rename.py importable without forcing whisperx into
+    # the module graph for unrelated tests.
+    from src.transcribe import write_outputs
+
+    data = json.loads(transcript_json.read_text(encoding="utf-8"))
+    apply_speaker_mapping(data.get("segments") or [], mapping)
+    out_base = transcript_json.with_suffix("")
+    write_outputs(data, out_base)
+
+
 def find_rename_pending(
     transcripts_dir: Path,
     incoming_dir: Path,
