@@ -54,3 +54,51 @@ def test_build_examples_skips_segments_without_speaker():
 
 def test_build_examples_empty_returns_empty():
     assert build_speaker_examples([]) == []
+
+
+from src.rename import apply_speaker_mapping, unmapped_speakers
+
+
+def test_apply_speaker_mapping_renames_segments_in_place():
+    segments = [
+        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "text": "hi"},
+        {"start": 1.0, "end": 2.0, "speaker": "SPEAKER_01", "text": "hello"},
+        {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_00", "text": "again"},
+    ]
+    apply_speaker_mapping(segments, {"SPEAKER_00": "Vedant"})
+    assert segments[0]["speaker"] == "Vedant"
+    assert segments[1]["speaker"] == "SPEAKER_01"
+    assert segments[2]["speaker"] == "Vedant"
+
+
+def test_apply_speaker_mapping_also_renames_word_segments():
+    segments = [
+        {
+            "speaker": "SPEAKER_00",
+            "words": [
+                {"word": "hi", "speaker": "SPEAKER_00"},
+                {"word": "there", "speaker": "SPEAKER_00"},
+            ],
+        }
+    ]
+    apply_speaker_mapping(segments, {"SPEAKER_00": "Alice"})
+    assert segments[0]["speaker"] == "Alice"
+    assert segments[0]["words"][0]["speaker"] == "Alice"
+    assert segments[0]["words"][1]["speaker"] == "Alice"
+
+
+def test_unmapped_speakers_finds_default_labels_only():
+    segments = [
+        {"speaker": "SPEAKER_00"},
+        {"speaker": "Vedant"},
+        {"speaker": "SPEAKER_03"},
+        {"speaker": "SPEAKER_00"},
+        {"speaker": None},
+        {},
+    ]
+    result = unmapped_speakers(segments)
+    assert sorted(result) == ["SPEAKER_00", "SPEAKER_03"]
+
+
+def test_unmapped_speakers_empty_returns_empty():
+    assert unmapped_speakers([]) == []

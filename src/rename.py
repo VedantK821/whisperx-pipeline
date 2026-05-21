@@ -7,7 +7,10 @@ transcription pipeline beyond the JSON segment shape.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+
+_DEFAULT_SPEAKER_RE = re.compile(r"^SPEAKER_\d+$")
 
 
 @dataclass
@@ -59,3 +62,31 @@ def build_speaker_examples(segments: list[dict]) -> list[SpeakerExample]:
 
     examples.sort(key=lambda e: e.total_seconds, reverse=True)
     return examples
+
+
+def apply_speaker_mapping(segments: list[dict], mapping: dict[str, str]) -> None:
+    """Rename speakers in-place across segments and any nested word-level
+    `words[].speaker` entries (which whisperx populates via
+    `assign_word_speakers`).
+    """
+    if not mapping:
+        return
+    for seg in segments:
+        spk = seg.get("speaker")
+        if spk in mapping:
+            seg["speaker"] = mapping[spk]
+        for w in seg.get("words", []) or []:
+            wspk = w.get("speaker")
+            if wspk in mapping:
+                w["speaker"] = mapping[wspk]
+
+
+def unmapped_speakers(segments: list[dict]) -> list[str]:
+    """Return distinct speaker labels that still match the default
+    `SPEAKER_\\d+` pattern. Order is insertion order (deterministic)."""
+    seen: dict[str, None] = {}
+    for seg in segments:
+        spk = seg.get("speaker")
+        if isinstance(spk, str) and _DEFAULT_SPEAKER_RE.match(spk):
+            seen.setdefault(spk, None)
+    return list(seen.keys())
