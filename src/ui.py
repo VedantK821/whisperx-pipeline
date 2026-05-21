@@ -141,6 +141,7 @@ def now_transcribing_panel(
     elapsed_s: float,
     frame: int,
     stages: tuple[str, ...],
+    review_seconds_remaining: float | None = None,
 ) -> Panel:
     if not filename:
         body = Align.center(
@@ -194,6 +195,14 @@ def now_transcribing_panel(
     grid.add_row("PULSE",    pulse_line)
     grid.add_row("STAGES",   chips)
     grid.add_row("PROGRESS", Text.assemble(bar, "  ", pct_text, "  ", elapsed_text))
+
+    if current_stage == "REVIEW" and review_seconds_remaining is not None:
+        secs = max(0, int(review_seconds_remaining))
+        countdown = Text()
+        countdown.append("✋ ", style=f"{NEON_YELLOW} bold")
+        countdown.append("press any key to name speakers", style=f"{NEON_YELLOW} bold")
+        countdown.append(f"  · {secs}s", style=DIM)
+        grid.add_row("PROMPT", countdown)
 
     return Panel(
         grid,
