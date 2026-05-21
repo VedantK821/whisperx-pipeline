@@ -256,6 +256,97 @@ def wait_for_keypress(timeout: float) -> str | None:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
+def _fmt_mmss(seconds: float) -> str:
+    seconds = max(0.0, float(seconds))
+    m, s = divmod(int(seconds), 60)
+    return f"{m:02d}:{s:02d}"
+
+
+def _render_speaker_card(
+    console,
+    idx: int,
+    total: int,
+    ex: "SpeakerExample",
+    snippet: "Snippet | None",
+) -> None:
+    """Print the speaker-rename panel for one speaker."""
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.text import Text
+
+    parts: list[Text] = [Text(
+        f"[{idx}/{total}] {ex.label} — speaks {_fmt_mmss(ex.total_seconds)} across {ex.segment_count} segments",
+        style="bold magenta1",
+    )]
+    if snippet:
+        snip_dur = snippet.end - snippet.start
+        parts.append(Text(f"  Longest sample ({snip_dur:.0f}s):", style="dim"))
+        parts.append(Text(f'  "{snippet.text}"', style="bright_cyan"))
+    else:
+        parts.append(Text("  (no text snippets available)", style="dim"))
+
+    console.print(Panel(Group(*parts), border_style="magenta1", padding=(0, 1)))
+
+
+def interactive_rename(
+    examples: list["SpeakerExample"],
+    audio_path: Path | None,
+    console,
+    *,
+    ffplay_available: bool,
+) -> dict[str, str] | None:
+    """Walk the user through naming each speaker. Returns a mapping
+    {SPEAKER_XX: name} of speakers that were actually renamed (skipped
+    speakers are NOT included). Returns None if the user aborted with `q`.
+    Returns an empty dict if every speaker was skipped (different from None —
+    "ran to completion but no names entered").
+    """
+    if not examples:
+        return {}
+
+    mapping: dict[str, str] = {}
+    can_play = ffplay_available and audio_path is not None and audio_path.exists()
+
+    for idx, ex in enumerate(examples, start=1):
+        snippet_cursor = 0
+        while True:
+            snippet = ex.snippets[snippet_cursor] if ex.snippets else None
+            _render_speaker_card(console, idx, len(examples), ex, snippet)
+
+            help_keys = ["Enter = keep"]
+            if can_play and snippet:
+                help_keys.append("p = play")
+            if len(ex.snippets) > 1:
+                help_keys.append("s = next snippet")
+            help_keys.append("q = abort rename")
+            prompt = f"  Name ({' · '.join(help_keys)}): "
+            try:
+                raw = console.input(prompt)
+            except (EOFError, KeyboardInterrupt):
+                console.print("[yellow]Aborted.[/yellow]")
+                return None
+            raw = raw.strip()
+
+            if raw == "":
+                break  # keep SPEAKER_XX
+            if raw.lower() == "q":
+                return None
+            if raw.lower() == "p" and can_play and snippet:
+                clip_dur = min(10.0, max(0.5, snippet.end - snippet.start))
+                console.print(f"[dim]  ♪ playing {clip_dur:.0f}s clip...[/dim]")
+                play_snippet(audio_path, snippet.start, duration=clip_dur)
+                continue
+            if raw.lower() == "s" and len(ex.snippets) > 1:
+                snippet_cursor = (snippet_cursor + 1) % len(ex.snippets)
+                continue
+
+            mapping[ex.label] = raw
+            console.print(f"  [green]✓[/green] {ex.label} → [bold]{raw}[/bold]")
+            break
+
+    return mapping
+
+
 def find_rename_pending(
     transcripts_dir: Path,
     incoming_dir: Path,
