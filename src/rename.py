@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -179,6 +181,32 @@ def rewrite_outputs_with_mapping(
     apply_speaker_mapping(data.get("segments") or [], mapping)
     out_base = transcript_json.with_suffix("")
     write_outputs(data, out_base)
+
+
+def ffplay_available() -> bool:
+    """True iff `ffplay` is resolvable on PATH."""
+    return shutil.which("ffplay") is not None
+
+
+def play_snippet(audio_path: Path, start: float, duration: float = 10.0) -> None:
+    """Play `[start, start+duration]` of `audio_path` via ffplay. Blocking.
+    Ctrl-C kills the subprocess and returns. Subprocess errors are swallowed
+    so the UI never crashes mid-rename.
+    """
+    cmd = [
+        "ffplay",
+        "-nodisp",
+        "-autoexit",
+        "-hide_banner",
+        "-loglevel", "quiet",
+        "-ss", f"{start}",
+        "-t", f"{duration}",
+        str(audio_path),
+    ]
+    try:
+        subprocess.run(cmd, check=False)
+    except (FileNotFoundError, KeyboardInterrupt, OSError) as e:
+        log.debug("ffplay invocation failed/interrupted: %s", e)
 
 
 def wait_for_keypress(timeout: float) -> str | None:
