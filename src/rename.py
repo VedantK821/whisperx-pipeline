@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -177,6 +179,53 @@ def rewrite_outputs_with_mapping(
     apply_speaker_mapping(data.get("segments") or [], mapping)
     out_base = transcript_json.with_suffix("")
     write_outputs(data, out_base)
+
+
+def wait_for_keypress(timeout: float) -> str | None:
+    """Non-blocking single-key read with timeout. Returns the first character
+    pressed (or first byte of a multi-byte sequence — sufficient for our
+    "any key engages" semantics), or None if the deadline passes.
+
+    Windows: msvcrt.kbhit + getwch.
+    POSIX:   select+termios (sets stdin to cbreak, restores on exit).
+    """
+    if timeout <= 0:
+        return None
+    deadline = time.monotonic() + timeout
+
+    if sys.platform == "win32":
+        import msvcrt
+        while time.monotonic() < deadline:
+            if msvcrt.kbhit():
+                ch = msvcrt.getwch()
+                # Function/arrow keys produce a two-char sequence; consume the
+                # second byte so the next prompt isn't polluted.
+                if ch in ("\x00", "\xe0"):
+                    if msvcrt.kbhit():
+                        msvcrt.getwch()
+                    return ch
+                return ch
+            time.sleep(0.03)
+        return None
+
+    # POSIX path
+    import select
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            r, _, _ = select.select([sys.stdin], [], [], min(remaining, 0.1))
+            if r:
+                return sys.stdin.read(1)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 def find_rename_pending(
