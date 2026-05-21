@@ -16,6 +16,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 import time
@@ -242,7 +243,13 @@ def scan_incoming(state: LiveState, cfg: Config) -> None:
             upsert(state, f, cfg)
 
 
-def run_one(row: Row, state: LiveState, cfg: Config) -> None:
+def run_one(
+    row: Row,
+    state: LiveState,
+    cfg: Config,
+    *,
+    on_review=None,
+) -> None:
     row.status = RUNNING
     row.started = time.monotonic()
     state.begin_file(row)
@@ -251,8 +258,20 @@ def run_one(row: Row, state: LiveState, cfg: Config) -> None:
             row.path, cfg,
             on_stage=state.on_stage,
             on_progress=state.on_progress,
+            on_review=on_review,
         )
         row.status = DONE
+        # If the resulting transcript still has SPEAKER_XX labels, flag this
+        # file for the post-batch catch-up prompt.
+        from . import rename
+        out_json = cfg.transcripts_dir / row.path.stem / f"{row.path.stem}.json"
+        try:
+            data = json.loads(out_json.read_text(encoding="utf-8"))
+            if rename.unmapped_speakers(data.get("segments") or []):
+                with state.lock:
+                    state.rename_pending.append(row)
+        except (OSError, json.JSONDecodeError):
+            pass
     except Exception as e:
         row.status = FAILED
         row.error = str(e).splitlines()[0][:200]
@@ -260,6 +279,52 @@ def run_one(row: Row, state: LiveState, cfg: Config) -> None:
     finally:
         row.finished = time.monotonic()
         state.end_file()
+
+
+def _make_on_review(
+    state: LiveState,
+    live: "Live",
+    args: argparse.Namespace,
+    ffplay_avail: bool,
+):
+    """Return a `ReviewCallback` closure suitable for transcribe_file.
+
+    1. Arms a countdown by setting state.review_examples / review_deadline.
+    2. Waits up to args.review_timeout for any key (non-blocking).
+    3. If a key arrives: pauses Live, runs interactive_rename, resumes Live,
+       returns the resulting mapping (or None on abort).
+    4. If timeout: returns None.
+    """
+    from . import rename
+
+    def _on_review(examples, audio_path):
+        if args.no_review:
+            return None
+
+        with state.lock:
+            state.review_examples = examples
+            state.review_deadline = time.monotonic() + args.review_timeout
+
+        key = rename.wait_for_keypress(args.review_timeout)
+
+        with state.lock:
+            state.review_examples = None
+            state.review_deadline = None
+
+        if key is None:
+            return None
+
+        # User engaged — pause Live for blocking prompts.
+        live.stop()
+        try:
+            return rename.interactive_rename(
+                examples, audio_path, console,
+                ffplay_available=ffplay_avail,
+            )
+        finally:
+            live.start(refresh=True)
+
+    return _on_review
 
 
 def _clear_terminal() -> None:
@@ -273,7 +338,14 @@ def _clear_terminal() -> None:
     console.file.flush()
 
 
-def process_batch(rows_to_run: list[Row], state: LiveState, cfg: Config) -> None:
+def process_batch(
+    rows_to_run: list[Row],
+    state: LiveState,
+    cfg: Config,
+    *,
+    args: argparse.Namespace,
+    ffplay_avail: bool,
+) -> None:
     stop = Event()
 
     _clear_terminal()
@@ -286,6 +358,8 @@ def process_batch(rows_to_run: list[Row], state: LiveState, cfg: Config) -> None
         redirect_stdout=True,
         redirect_stderr=True,
     ) as live:
+        on_review = _make_on_review(state, live, args=args, ffplay_avail=ffplay_avail)
+
         def _ticker():
             while not stop.is_set():
                 with state.lock:
@@ -297,7 +371,7 @@ def process_batch(rows_to_run: list[Row], state: LiveState, cfg: Config) -> None
         ticker.start()
         try:
             for row in rows_to_run:
-                run_one(row, state, cfg)
+                run_one(row, state, cfg, on_review=on_review)
                 live.update(render(state, cfg))
         finally:
             stop.set()
@@ -305,7 +379,13 @@ def process_batch(rows_to_run: list[Row], state: LiveState, cfg: Config) -> None
             live.update(render(state, cfg))
 
 
-def watch_loop(state: LiveState, cfg: Config) -> None:
+def watch_loop(
+    state: LiveState,
+    cfg: Config,
+    *,
+    args: argparse.Namespace,
+    ffplay_avail: bool,
+) -> None:
     queue: Queue[Path] = Queue()
 
     def on_new(p: Path) -> None:
@@ -327,6 +407,8 @@ def watch_loop(state: LiveState, cfg: Config) -> None:
         redirect_stdout=True,
         redirect_stderr=True,
     ) as live:
+        on_review = _make_on_review(state, live, args=args, ffplay_avail=ffplay_avail)
+
         def _ticker():
             while not stop.is_set():
                 with state.lock:
@@ -353,7 +435,7 @@ def watch_loop(state: LiveState, cfg: Config) -> None:
                     row.error = "vanished before stable"
                     live.update(render(state, cfg))
                     continue
-                run_one(row, state, cfg)
+                run_one(row, state, cfg, on_review=on_review)
                 live.update(render(state, cfg))
         except KeyboardInterrupt:
             pass
@@ -378,6 +460,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--files", nargs="+", type=Path,
                         help="Restrict to these files (relative to incoming/ or absolute).")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("--no-review", action="store_true",
+                        help="Disable the inline REVIEW prompt (transcribe without name prompts).")
+    parser.add_argument("--review-timeout", type=float, default=7.0,
+                        help="Seconds the inline REVIEW prompt waits for a keypress (default: 7).")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -389,6 +475,9 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = Config.load()
     state = LiveState()
+
+    from . import rename
+    ffplay_avail = rename.ffplay_available()
 
     if args.files:
         for f in args.files:
@@ -459,12 +548,12 @@ def main(argv: list[str] | None = None) -> int:
             to_run = new
 
     if to_run:
-        process_batch(to_run, state, cfg)
+        process_batch(to_run, state, cfg, args=args, ffplay_avail=ffplay_avail)
 
     failed = sum(1 for r in state.rows if r.status == FAILED)
 
     if args.watch:
-        watch_loop(state, cfg)
+        watch_loop(state, cfg, args=args, ffplay_avail=ffplay_avail)
 
     return 1 if failed else 0
 
