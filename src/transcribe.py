@@ -21,11 +21,16 @@ STAGE_LOAD = "LOAD"
 STAGE_ASR = "ASR"
 STAGE_ALIGN = "ALIGN"
 STAGE_DIARIZE = "DIARIZE"
+STAGE_REVIEW = "REVIEW"
 STAGE_WRITE = "WRITE"
-STAGES: tuple[str, ...] = (STAGE_LOAD, STAGE_ASR, STAGE_ALIGN, STAGE_DIARIZE, STAGE_WRITE)
+STAGES: tuple[str, ...] = (
+    STAGE_LOAD, STAGE_ASR, STAGE_ALIGN, STAGE_DIARIZE, STAGE_REVIEW, STAGE_WRITE,
+)
 
 StageCallback = Callable[[str, dict[str, Any]], None]
 ProgressCallback = Callable[[str, float], None]  # (stage, fraction in 0..1)
+# (examples, audio_path) -> mapping (or None to skip)
+ReviewCallback = Callable[[list[Any], Path], "dict[str, str] | None"]
 
 
 def _srt_ts(seconds: float) -> str:
@@ -83,6 +88,7 @@ def transcribe_file(
     batch_size: int = 16,
     on_stage: StageCallback | None = None,
     on_progress: ProgressCallback | None = None,
+    on_review: ReviewCallback | None = None,
 ) -> Path:
     """Run ASR + alignment + diarization on `audio_path`.
 
@@ -170,9 +176,40 @@ def transcribe_file(
     else:
         log.warning("HF_TOKEN not set; skipping diarization.")
 
-    cb(STAGE_WRITE, {})
+    cb(STAGE_REVIEW, {})
     out_dir = cfg.transcripts_dir / audio_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Local import to avoid a top-level circular import (rename imports from
+    # transcribe via local imports inside its functions).
+    from . import rename
+
+    segments = result.get("segments") or []
+    persisted = rename.load_persisted_mapping(out_dir, audio_path.stem)
+    if persisted:
+        rename.apply_speaker_mapping(segments, persisted)
+        log.info("Applied %d persisted name(s) for %s", len(persisted), audio_path.name)
+
+    remaining = rename.unmapped_speakers(segments)
+    new_mapping: dict[str, str] = {}
+    if remaining and on_review is not None:
+        examples = rename.build_speaker_examples(segments)
+        examples = [e for e in examples if e.label in remaining]
+        try:
+            review_result = on_review(examples, audio_path)
+        except Exception:
+            log.exception("on_review callback raised; continuing without rename")
+            review_result = None
+        if review_result:
+            rename.apply_speaker_mapping(segments, review_result)
+            new_mapping = review_result
+
+    if new_mapping:
+        merged = dict(persisted or {})
+        merged.update(new_mapping)
+        rename.save_persisted_mapping(out_dir, audio_path.stem, audio_path.name, merged)
+
+    cb(STAGE_WRITE, {})
     out_base = out_dir / audio_path.stem
     write_outputs(result, out_base)
     log.info("Wrote %s.{json,txt,srt}", out_base)
