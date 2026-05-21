@@ -39,7 +39,7 @@ def _srt_ts(seconds: float) -> str:
     return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
 
 
-def _write_outputs(result: dict[str, Any], out_base: Path) -> None:
+def write_outputs(result: dict[str, Any], out_base: Path) -> None:
     segments = result.get("segments", [])
 
     out_base.with_suffix(".json").write_text(
@@ -174,6 +174,6 @@ def transcribe_file(
     out_dir = cfg.transcripts_dir / audio_path.stem
     out_dir.mkdir(parents=True, exist_ok=True)
     out_base = out_dir / audio_path.stem
-    _write_outputs(result, out_base)
+    write_outputs(result, out_base)
     log.info("Wrote %s.{json,txt,srt}", out_base)
     return out_base.with_suffix(".json")
