@@ -1,0 +1,31 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Environment
+.env
+
+# Project artifacts
+models/
+incoming/*
+!incoming/.gitkeep
+transcripts/*
+!transcripts/.gitkeep
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
