@@ -407,6 +407,46 @@ def _clear_terminal() -> None:
     console.file.flush()
 
 
+def _startup_countdown(new_rows: list[Row], timeout: float) -> bool:
+    """Show the new recordings found and a short countdown. Return True to
+    proceed (auto-transcribe), or False if the user pressed a key (wants the
+    options menu). A timeout <= 0 proceeds immediately with no countdown.
+    """
+    from . import rename
+    from rich.live import Live
+    from rich.text import Text
+
+    if timeout <= 0:
+        return True
+
+    listing = "\n".join(f"   • {r.name}" for r in new_rows)
+    console.print(
+        f"\n[{ui.NEON_CYAN}]▶ {len(new_rows)} new recording(s) found:[/{ui.NEON_CYAN}]\n"
+        f"[{ui.DIM}]{listing}[/{ui.DIM}]\n"
+    )
+
+    width = 24
+
+    def line(remaining: float) -> Text:
+        frac = max(0.0, min(1.0, 1.0 - remaining / timeout))
+        filled = int(frac * width)
+        secs = int(remaining) + 1
+        t = Text(f"  Transcribing in {secs}s…  press any key for options  ", style=ui.DIM)
+        t.append("█" * filled, style=ui.NEON_CYAN)
+        t.append("░" * (width - filled), style=ui.GRID)
+        return t
+
+    deadline = time.monotonic() + timeout
+    with Live(line(timeout), console=console, refresh_per_second=20, transient=True) as live:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            live.update(line(remaining))
+            if rename.wait_for_keypress(min(0.08, remaining)) is not None:
+                return False
+
+
 def process_batch(
     rows_to_run: list[Row],
     state: LiveState,
