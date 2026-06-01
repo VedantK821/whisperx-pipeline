@@ -140,3 +140,24 @@ def test_current_snippet_none_when_no_snippets():
     assert nav.current_snippet() is None
     nav.step(KEY_RIGHT)  # must not raise
     assert nav.sample_idx == 0
+
+
+from unittest.mock import patch
+
+from src.rename import interactive_rename
+
+
+def test_interactive_rename_empty_returns_empty_dict():
+    assert interactive_rename([], None, console=None, ffplay_available=False) == {}
+
+
+def test_interactive_rename_uses_line_mode_when_not_a_tty():
+    # When stdin isn't a TTY, it must delegate to the line-mode fallback rather
+    # than entering the raw loop. We stub the fallback and assert it's called.
+    examples = [ex("SPEAKER_00")]
+    with patch("src.rename.sys.stdin") as stdin, \
+         patch("src.rename._interactive_rename_lines", return_value={"SPEAKER_00": "X"}) as lines:
+        stdin.isatty.return_value = False
+        result = interactive_rename(examples, None, console=object(), ffplay_available=False)
+    assert result == {"SPEAKER_00": "X"}
+    lines.assert_called_once()

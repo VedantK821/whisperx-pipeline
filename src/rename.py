@@ -554,11 +554,66 @@ def interactive_rename(
     *,
     ffplay_available: bool,
 ) -> dict[str, str] | None:
-    """Walk the user through naming each speaker. Returns a mapping
-    {SPEAKER_XX: name} of speakers that were actually renamed (skipped
-    speakers are NOT included). Returns None if the user aborted with `q`.
-    Returns an empty dict if every speaker was skipped (different from None —
-    "ran to completion but no names entered").
+    """Walk the user through naming each speaker.
+
+    On a TTY, runs the keyboard-native raw loop (arrows flip samples, type to
+    name, Space plays). When stdin isn't a TTY (pipe/CI), falls back to the
+    line-mode prompt. Returns {SPEAKER_XX: name} for speakers actually renamed,
+    {} if none were, or None if the user aborted (Ctrl-C / EOF).
+    """
+    if not examples:
+        return {}
+
+    can_play = (
+        ffplay_available and audio_path is not None and audio_path.exists()
+    )
+
+    if not sys.stdin.isatty():
+        return _interactive_rename_lines(
+            examples, audio_path, console, ffplay_available=can_play
+        )
+
+    from rich.live import Live
+
+    nav = RenameNav(examples=examples)
+    try:
+        with raw_mode(), Live(
+            _render_nav_card(nav, can_play),
+            console=console,
+            refresh_per_second=12,
+            screen=False,
+            transient=False,
+        ) as live:
+            while not nav.finished and not nav.aborted:
+                try:
+                    key = read_key()
+                except KeyboardInterrupt:
+                    return None
+                effect = nav.step(key)
+                live.update(_render_nav_card(nav, can_play))
+                if effect == PLAY and can_play:
+                    snippet = nav.current_snippet()
+                    if snippet:
+                        clip = min(10.0, max(0.5, snippet.end - snippet.start))
+                        play_snippet(audio_path, snippet.start, duration=clip)
+    except (EOFError, KeyboardInterrupt):
+        return None
+
+    return None if nav.aborted else nav.mapping
+
+
+def _interactive_rename_lines(
+    examples: list["SpeakerExample"],
+    audio_path: Path | None,
+    console,
+    *,
+    ffplay_available: bool,
+) -> dict[str, str] | None:
+    """Line-mode rename prompt (type + Enter). Used as the non-TTY fallback.
+    Returns a mapping {SPEAKER_XX: name} of speakers that were actually renamed
+    (skipped speakers are NOT included). Returns None if the user aborted with
+    `q`. Returns an empty dict if every speaker was skipped (different from
+    None — "ran to completion but no names entered").
     """
     if not examples:
         return {}
