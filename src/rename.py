@@ -16,12 +16,56 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 log = logging.getLogger(__name__)
 
 _DEFAULT_SPEAKER_RE = re.compile(r"^SPEAKER_\d+$")
 
 PERSIST_VERSION = 1
+
+
+# ─── Raw keyboard input ───────────────────────────────────────────────────────
+# Semantic key tokens returned by decode_key/read_key. Printable characters are
+# returned as the character itself (e.g. "a", " "); everything else is one of:
+KEY_LEFT = "LEFT"
+KEY_RIGHT = "RIGHT"
+KEY_UP = "UP"
+KEY_DOWN = "DOWN"
+KEY_ENTER = "ENTER"
+KEY_BACKSPACE = "BACKSPACE"
+KEY_ESC = "ESC"
+KEY_EOF = "EOF"          # stdin closed — caller should abort
+KEY_UNKNOWN = "UNKNOWN"  # an unrecognised escape/function key — caller ignores
+
+_WIN_ARROWS = {"H": KEY_UP, "P": KEY_DOWN, "K": KEY_LEFT, "M": KEY_RIGHT}
+_POSIX_ARROWS = {"A": KEY_UP, "B": KEY_DOWN, "C": KEY_RIGHT, "D": KEY_LEFT}
+
+
+def decode_key(getch: Callable[[], str]) -> str:
+    """Decode one logical keypress from a raw character source.
+
+    `getch()` returns the next raw character, or "" when no more input is
+    available. Split out from read_key() so the (fiddly, cross-platform)
+    decoding logic is unit-testable without a real terminal.
+    """
+    ch = getch()
+    if ch == "":
+        return KEY_EOF
+    if ch == "\x03":                       # Ctrl-C
+        raise KeyboardInterrupt
+    if ch in ("\x00", "\xe0"):             # Windows function/arrow prefix
+        return _WIN_ARROWS.get(getch(), KEY_UNKNOWN)
+    if ch == "\x1b":                       # ESC — bare, or start of a sequence
+        nxt = getch()
+        if nxt == "[":
+            return _POSIX_ARROWS.get(getch(), KEY_UNKNOWN)
+        return KEY_ESC
+    if ch in ("\r", "\n"):
+        return KEY_ENTER
+    if ch in ("\x7f", "\x08"):
+        return KEY_BACKSPACE
+    return ch                              # printable (incl. " ")
 
 
 @dataclass
