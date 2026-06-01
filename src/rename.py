@@ -480,6 +480,14 @@ def _render_nav_card(nav: "RenameNav", can_play: bool):
 
     ex = nav.current
     total = len(nav.examples)
+    if ex is None:  # finished — advanced past the last speaker
+        return Panel(
+            Text("✓ all speakers named", style="spring_green2 bold"),
+            title=Text(f"[ Speaker {total} / {total} ]", style="magenta1 bold"),
+            title_align="left",
+            border_style="magenta1",
+            padding=(0, 1),
+        )
     parts: list[Text] = [
         Text(
             f"{ex.label}     {_fmt_mmss(ex.total_seconds)} speaking · "
@@ -585,12 +593,14 @@ def interactive_rename(
             transient=False,
         ) as live:
             while not nav.finished and not nav.aborted:
+                # Render the CURRENT state at the top of the loop, so we never
+                # draw the post-finish state (speaker_idx past the last speaker).
+                live.update(_render_nav_card(nav, can_play))
                 try:
                     key = read_key()
                 except KeyboardInterrupt:
                     return None
                 effect = nav.step(key)
-                live.update(_render_nav_card(nav, can_play))
                 if effect == PLAY and can_play:
                     snippet = nav.current_snippet()
                     if snippet:
