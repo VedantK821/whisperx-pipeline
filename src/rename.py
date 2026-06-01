@@ -471,6 +471,56 @@ class RenameNav:
         return None
 
 
+def _render_nav_card(nav: "RenameNav", can_play: bool):
+    """Build the Rich Panel for the keyboard-native rename loop. Pure render:
+    returns a renderable, prints nothing."""
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.text import Text
+
+    ex = nav.current
+    total = len(nav.examples)
+    parts: list[Text] = [
+        Text(
+            f"{ex.label}     {_fmt_mmss(ex.total_seconds)} speaking · "
+            f"{ex.segment_count} segments",
+            style="bold magenta1",
+        ),
+        Text(""),
+    ]
+
+    snippet = nav.current_snippet()
+    if snippet:
+        n = len(ex.snippets)
+        dur = snippet.end - snippet.start
+        parts.append(Text(f"Sample {nav.sample_idx + 1} / {n}   ({dur:.0f}s)", style="dim"))
+        parts.append(Text(f'"{snippet.text}"', style="bright_cyan"))
+    else:
+        parts.append(Text("(no samples)", style="dim"))
+
+    parts.append(Text(""))
+    name_line = Text("Name: ", style="bold")
+    name_line.append(nav.name_buffer, style="bright_white")
+    name_line.append("▍", style="bright_white")
+    parts.append(name_line)
+    parts.append(Text(""))
+
+    hints = Text("← → sample", style="dim")
+    if can_play:
+        hints.append("    ␣ play", style="dim")
+    hints.append("    ↑ ↓ speaker", style="dim")
+    parts.append(hints)
+    parts.append(Text("type to name · ⏎ commit/keep · ⌫ edit · esc done", style="dim"))
+
+    return Panel(
+        Group(*parts),
+        title=Text(f"[ Speaker {nav.speaker_idx + 1} / {total} ]", style="magenta1 bold"),
+        title_align="left",
+        border_style="magenta1",
+        padding=(0, 1),
+    )
+
+
 def _render_speaker_card(
     console,
     idx: int,
