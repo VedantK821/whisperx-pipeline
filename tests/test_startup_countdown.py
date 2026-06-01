@@ -22,3 +22,13 @@ def test_returns_false_when_key_pressed():
     # Any key -> drop to the menu.
     with patch("src.rename.wait_for_keypress", return_value="x"):
         assert _startup_countdown(make_rows(1), 5.0) is False
+
+
+def test_start_timeout_arg_defaults_to_3():
+    import argparse
+
+    # Guards the intended default/contract for the --start-timeout flag.
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--start-timeout", type=float, default=3.0)
+    assert parser.parse_args([]).start_timeout == 3.0
+    assert parser.parse_args(["--start-timeout", "0"]).start_timeout == 0.0

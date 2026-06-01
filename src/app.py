@@ -573,6 +573,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="Disable the inline REVIEW prompt (transcribe without name prompts).")
     parser.add_argument("--review-timeout", type=float, default=7.0,
                         help="Seconds the inline REVIEW prompt waits for a keypress (default: 7).")
+    parser.add_argument("--start-timeout", type=float, default=3.0,
+                        help="Seconds the launch countdown waits before auto-transcribing "
+                             "new files (0 = start immediately; default: 3).")
     args = parser.parse_args(argv)
 
     logging.basicConfig(
@@ -622,56 +625,60 @@ def main(argv: list[str] | None = None) -> int:
     elif args.yes:
         to_run = new
     else:
-        if new and skipped:
-            prompt = (f"\n[bold]Transcribe {len(new)} new?[/bold]  "
-                      f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es / "
-                      f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force"
-                      f"{rename_chip}"
-                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
-                      f"[[{ui.DIM}]q[/{ui.DIM}]]uit")
-            default = "y"
-        elif new:
-            prompt = (f"\n[bold]Transcribe {len(new)} new?[/bold]  "
-                      f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es"
-                      f"{rename_chip}"
-                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
-                      f"[[{ui.DIM}]q[/{ui.DIM}]]uit")
-            default = "y"
-        elif skipped:
-            prompt = (f"\nAll caught up. "
-                      f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force"
-                      f"{rename_chip}"
-                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
-                      f"[[{ui.DIM}]Q[/{ui.DIM}]]uit")
-            default = "q"
+        if new and _startup_countdown(new, args.start_timeout):
+            # New recordings found and the countdown elapsed — just go.
+            to_run = new
         else:
-            prompt = (f"\nNothing here."
-                      f"{rename_chip}"
-                      f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
-                      f"[[{ui.DIM}]Q[/{ui.DIM}]]uit")
-            default = "q"
+            if new and skipped:
+                prompt = (f"\n[bold]Transcribe {len(new)} new?[/bold]  "
+                          f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es / "
+                          f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force"
+                          f"{rename_chip}"
+                          f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+                          f"[[{ui.DIM}]q[/{ui.DIM}]]uit")
+                default = "y"
+            elif new:
+                prompt = (f"\n[bold]Transcribe {len(new)} new?[/bold]  "
+                          f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es"
+                          f"{rename_chip}"
+                          f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+                          f"[[{ui.DIM}]q[/{ui.DIM}]]uit")
+                default = "y"
+            elif skipped:
+                prompt = (f"\nAll caught up. "
+                          f"[[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]]ll force"
+                          f"{rename_chip}"
+                          f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+                          f"[[{ui.DIM}]Q[/{ui.DIM}]]uit")
+                default = "q"
+            else:
+                prompt = (f"\nNothing here."
+                          f"{rename_chip}"
+                          f" / [[{ui.NEON_YELLOW}]w[/{ui.NEON_YELLOW}]]atch / "
+                          f"[[{ui.DIM}]Q[/{ui.DIM}]]uit")
+                default = "q"
 
-        choice = Prompt.ask(prompt, default=default, show_default=False).strip().lower()
-        if choice in ("q", "n", ""):
-            return 0
-        if choice == "r" and rename_pending_existing:
-            for p in rename_pending_existing:
-                _run_rename_for_transcript(
-                    p.transcript_json, p.audio_path, cfg,
-                    ffplay_avail=ffplay_avail,
-                )
-            return 0
-        if choice == "a":
-            for r in state.rows:
-                r.status = PENDING
-                r.started = r.finished = None
-                r.error = None
-            to_run = list(state.rows)
-        elif choice == "w":
-            to_run = new
-            args.watch = True
-        else:
-            to_run = new
+            choice = Prompt.ask(prompt, default=default, show_default=False).strip().lower()
+            if choice in ("q", "n", ""):
+                return 0
+            if choice == "r" and rename_pending_existing:
+                for p in rename_pending_existing:
+                    _run_rename_for_transcript(
+                        p.transcript_json, p.audio_path, cfg,
+                        ffplay_avail=ffplay_avail,
+                    )
+                return 0
+            if choice == "a":
+                for r in state.rows:
+                    r.status = PENDING
+                    r.started = r.finished = None
+                    r.error = None
+                to_run = list(state.rows)
+            elif choice == "w":
+                to_run = new
+                args.watch = True
+            else:
+                to_run = new
 
     if to_run:
         process_batch(to_run, state, cfg, args=args, ffplay_avail=ffplay_avail)
