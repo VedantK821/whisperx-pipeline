@@ -153,10 +153,95 @@ class SpeakerExample:
     snippets: list[Snippet] = field(default_factory=list)
 
 
+# ─── Sample selection (speaker-pure, ~3-6s) ──────────────────────────────────
+_SAMPLE_MIN_S = 1.2        # drop runs shorter than this (a one-word "Yeah.")
+_SAMPLE_MAX_S = 6.0        # trim a clean run to about this many seconds
+_SAMPLES_PER_SPEAKER = 6   # samples offered per speaker (flip with ← →)
+
+
+def _speaker_pure_runs(words: list[dict], label: str) -> list[list[dict]]:
+    """Split `words` into maximal contiguous runs spoken by `label`. A word
+    tagged as a different speaker, or one missing timing, ends the current run;
+    untagged words continue it (alignment occasionally drops the tag). Returns
+    [] when there's no usable word-level timing."""
+    runs: list[list[dict]] = []
+    cur: list[dict] = []
+    for word in words:
+        wspk = word.get("speaker")
+        if word.get("start") is None or word.get("end") is None or (
+            wspk is not None and wspk != label
+        ):
+            if cur:
+                runs.append(cur)
+                cur = []
+            continue
+        cur.append(word)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+def _snippet_from_run(run: list[dict]) -> "Snippet | None":
+    """Build a Snippet from a word run, trimmed to ~_SAMPLE_MAX_S from its start
+    so the played window stays short and matches the shown text."""
+    t0 = float(run[0]["start"])
+    kept: list[dict] = []
+    for word in run:
+        kept.append(word)
+        if float(word["end"]) - t0 >= _SAMPLE_MAX_S:
+            break
+    text = " ".join((w.get("word") or "").strip() for w in kept).strip()
+    if not text:
+        return None
+    return Snippet(text=text, start=float(kept[0]["start"]), end=float(kept[-1]["end"]))
+
+
+def _sample_rank(sn: "Snippet") -> tuple[float, int]:
+    """Sort key: prefer samples inside the 3-6s sweet spot, then longer text."""
+    dur = sn.end - sn.start
+    if dur < 3.0:
+        band = 3.0 - dur
+    elif dur > _SAMPLE_MAX_S:
+        band = dur - _SAMPLE_MAX_S
+    else:
+        band = 0.0
+    return (band, -len(sn.text))
+
+
+def _build_speaker_snippets(segs: list[dict], label: str) -> list[Snippet]:
+    """Preferred: speaker-pure, trimmed samples from word-level timing, ranked
+    toward the ~3-6s sweet spot. Falls back to whole-segment samples (longest
+    first) when no word timing exists (e.g. alignment was unavailable)."""
+    pure: list[Snippet] = []
+    for s in segs:
+        for run in _speaker_pure_runs(s.get("words") or [], label):
+            sn = _snippet_from_run(run)
+            if sn and (sn.end - sn.start) >= _SAMPLE_MIN_S:
+                pure.append(sn)
+
+    if pure:
+        pure.sort(key=_sample_rank)
+        return pure[:_SAMPLES_PER_SPEAKER]
+
+    snippets = [
+        Snippet(
+            text=(s.get("text") or "").strip(),
+            start=float(s.get("start", 0)),
+            end=float(s.get("end", 0)),
+        )
+        for s in segs
+        if (s.get("text") or "").strip()
+    ]
+    snippets.sort(key=lambda sn: len(sn.text), reverse=True)
+    return snippets
+
+
 def build_speaker_examples(segments: list[dict]) -> list[SpeakerExample]:
     """Group segments by speaker. Return examples sorted by total speaking time
-    (descending). Each example's `snippets` are sorted by text length descending.
-    Segments without a `speaker` field are skipped.
+    (descending). Each example's `snippets` are speaker-pure samples trimmed to
+    a ~3-6s window (so played audio matches the shown text and contains only the
+    target speaker); without word-level timing they fall back to whole-segment
+    samples, longest first. Segments without a `speaker` field are skipped.
     """
     grouped: dict[str, list[dict]] = {}
     for seg in segments:
@@ -168,21 +253,11 @@ def build_speaker_examples(segments: list[dict]) -> list[SpeakerExample]:
     examples: list[SpeakerExample] = []
     for label, segs in grouped.items():
         total = sum(float(s.get("end", 0)) - float(s.get("start", 0)) for s in segs)
-        snippets = [
-            Snippet(
-                text=(s.get("text") or "").strip(),
-                start=float(s.get("start", 0)),
-                end=float(s.get("end", 0)),
-            )
-            for s in segs
-            if (s.get("text") or "").strip()
-        ]
-        snippets.sort(key=lambda sn: len(sn.text), reverse=True)
         examples.append(SpeakerExample(
             label=label,
             total_seconds=total,
             segment_count=len(segs),
-            snippets=snippets,
+            snippets=_build_speaker_snippets(segs, label),
         ))
 
     examples.sort(key=lambda e: e.total_seconds, reverse=True)
