@@ -293,10 +293,16 @@ def ffplay_available() -> bool:
     return shutil.which("ffplay") is not None
 
 
-def play_snippet(audio_path: Path, start: float, duration: float = 10.0) -> None:
-    """Play `[start, start+duration]` of `audio_path` via ffplay. Blocking.
-    Ctrl-C kills the subprocess and returns. Subprocess errors are swallowed
-    so the UI never crashes mid-rename.
+def play_snippet(
+    audio_path: Path, start: float, duration: float = 10.0
+) -> "subprocess.Popen | None":
+    """Start playing `[start, start+duration]` of `audio_path` via ffplay.
+
+    NON-BLOCKING: spawns ffplay and returns the process handle immediately so the
+    rename loop keeps reading keys and updating the display while audio plays.
+    `stdin` is detached (DEVNULL) so ffplay can't swallow the keystrokes we're
+    reading. Returns None if ffplay can't be launched (errors are swallowed so
+    the UI never crashes mid-rename).
     """
     cmd = [
         "ffplay",
@@ -309,9 +315,15 @@ def play_snippet(audio_path: Path, start: float, duration: float = 10.0) -> None
         str(audio_path),
     ]
     try:
-        subprocess.run(cmd, check=False)
-    except (FileNotFoundError, KeyboardInterrupt, OSError) as e:
-        log.debug("ffplay invocation failed/interrupted: %s", e)
+        return subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError) as e:
+        log.debug("ffplay invocation failed: %s", e)
+        return None
 
 
 def wait_for_keypress(timeout: float) -> str | None:
@@ -584,6 +596,17 @@ def interactive_rename(
     from rich.live import Live
 
     nav = RenameNav(examples=examples)
+    player: "subprocess.Popen | None" = None
+
+    def _stop_player() -> None:
+        nonlocal player
+        if player is not None and player.poll() is None:
+            try:
+                player.terminate()
+            except OSError:
+                pass
+        player = None
+
     try:
         with raw_mode(), Live(
             _render_nav_card(nav, can_play),
@@ -604,10 +627,13 @@ def interactive_rename(
                 if effect == PLAY and can_play:
                     snippet = nav.current_snippet()
                     if snippet:
+                        _stop_player()  # replace any clip already playing
                         clip = min(10.0, max(0.5, snippet.end - snippet.start))
-                        play_snippet(audio_path, snippet.start, duration=clip)
+                        player = play_snippet(audio_path, snippet.start, duration=clip)
     except (EOFError, KeyboardInterrupt):
         return None
+    finally:
+        _stop_player()
 
     return None if nav.aborted else nav.mapping
 
