@@ -76,3 +76,22 @@ def test_raw_mode_is_a_noop_context_when_not_a_tty(monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
     with raw_mode():  # must not raise even with no real terminal
         pass
+
+
+def test_read_key_waits_for_lagging_arrow_followup_byte(monkeypatch):
+    # Windows race: the \xe0 arrow prefix arrives, kbhit() briefly lags, then
+    # the code byte 'M' (right arrow) shows up. read_key must wait for it and
+    # decode KEY_RIGHT — not drop it and let 'M' get typed as a letter later.
+    import src.rename as r
+    if r.sys.platform != "win32":
+        import pytest
+        pytest.skip("windows-specific console input path")
+    import msvcrt
+
+    getwch_seq = iter(["\xe0", "M"])
+    kbhit_seq = iter([False, True])  # lag once, then the byte is ready
+    monkeypatch.setattr(msvcrt, "getwch", lambda: next(getwch_seq))
+    monkeypatch.setattr(msvcrt, "kbhit", lambda: next(kbhit_seq))
+    monkeypatch.setattr(r.time, "sleep", lambda s: None)
+
+    assert r.read_key() == KEY_RIGHT

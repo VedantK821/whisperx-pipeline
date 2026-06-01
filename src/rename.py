@@ -88,8 +88,17 @@ def read_key(_getch: Callable[[], str] | None = None) -> str:
             nonlocal first
             if first:
                 first = False
-                return msvcrt.getwch()        # blocking
-            return msvcrt.getwch() if msvcrt.kbhit() else ""  # buffered only
+                return msvcrt.getwch()        # blocking — wait for the first key
+            # Follow-up byte of a multi-key sequence (e.g. the code after an
+            # \xe0/\x00 arrow prefix). It arrives almost instantly, but kbhit()
+            # can briefly lag — so poll for a short window instead of giving up
+            # immediately and letting the stray byte get typed as a letter.
+            deadline = time.monotonic() + 0.05
+            while time.monotonic() < deadline:
+                if msvcrt.kbhit():
+                    return msvcrt.getwch()
+                time.sleep(0.002)
+            return ""                          # genuinely nothing more (lone ESC)
 
         return decode_key(getch)
 
