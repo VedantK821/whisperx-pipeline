@@ -329,6 +329,81 @@ def _run_rename_for_transcript(
     console.print(f"[{ui.NEON_GREEN}]✓ Rewrote outputs for {stem}.[/{ui.NEON_GREEN}]")
 
 
+def _parse_pending_choice(raw: str, count: int) -> "str | int | None":
+    """Parse a rename-pending picker choice. Returns 'all', 'quit', a 0-based
+    index into the list, or None for unrecognised input."""
+    s = raw.strip().lower()
+    if s in ("a", "all"):
+        return "all"
+    if s in ("", "q", "quit"):
+        return "quit"
+    if s.isdigit():
+        n = int(s)
+        if 1 <= n <= count:
+            return n - 1
+    return None
+
+
+def _render_pending_list(pending: list) -> "Any":
+    """Build the numbered [ RENAME PENDING ] panel."""
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.text import Text
+
+    t = Table.grid(padding=(0, 3))
+    t.add_column(justify="right", style=ui.DIM, no_wrap=True)
+    t.add_column(overflow="fold")
+    t.add_column(style=ui.NEON_YELLOW, no_wrap=True)
+    t.add_column(style=ui.DIM, no_wrap=True)
+    for i, p in enumerate(pending, 1):
+        n = len(p.unmapped)
+        audio = "♪ audio" if p.audio_path else "— no audio"
+        t.add_row(str(i), p.transcript_json.stem, f"{n} unnamed", audio)
+
+    return Panel(
+        t,
+        title=Text("[ RENAME PENDING ]", style=f"{ui.NEON_MAGENTA} bold"),
+        title_align="left",
+        border_style=ui.GRID,
+        padding=(0, 1),
+    )
+
+
+def _pick_and_rename_pending(pending: list, cfg: Config, console, *, ffplay_avail: bool) -> None:
+    """Let the user pick which pending transcript(s) to rename — one at a time,
+    'a' for all, or 'q' to cancel. Renamed picks drop off the list so they can
+    keep choosing until done."""
+    remaining = list(pending)
+    while remaining:
+        console.print(_render_pending_list(remaining))
+        raw = Prompt.ask(
+            f"[bold]Pick[/bold] 1-{len(remaining)} · "
+            f"[{ui.NEON_MAGENTA}]a[/{ui.NEON_MAGENTA}]ll · "
+            f"[{ui.DIM}]q[/{ui.DIM}]uit",
+            default="q",
+            show_default=False,
+        )
+        choice = _parse_pending_choice(raw, len(remaining))
+        if choice == "quit":
+            return
+        if choice == "all":
+            for p in remaining:
+                _run_rename_for_transcript(
+                    p.transcript_json, p.audio_path, cfg, ffplay_avail=ffplay_avail
+                )
+            return
+        if choice is None:
+            console.print(
+                f"[{ui.NEON_RED}]Enter a number 1-{len(remaining)}, 'a', or 'q'.[/{ui.NEON_RED}]"
+            )
+            continue
+        p = remaining.pop(choice)
+        _run_rename_for_transcript(
+            p.transcript_json, p.audio_path, cfg, ffplay_avail=ffplay_avail
+        )
+    console.print(f"[{ui.NEON_GREEN}]No more pending transcripts.[/{ui.NEON_GREEN}]")
+
+
 def _post_batch_catchup(state: LiveState, cfg: Config, *, ffplay_avail: bool) -> None:
     """Prompt to name remaining unnamed speakers across just-finished batch."""
     pending = list(state.rename_pending)
@@ -662,11 +737,9 @@ def main(argv: list[str] | None = None) -> int:
             if choice in ("q", "n", ""):
                 return 0
             if choice == "r" and rename_pending_existing:
-                for p in rename_pending_existing:
-                    _run_rename_for_transcript(
-                        p.transcript_json, p.audio_path, cfg,
-                        ffplay_avail=ffplay_avail,
-                    )
+                _pick_and_rename_pending(
+                    rename_pending_existing, cfg, console, ffplay_avail=ffplay_avail
+                )
                 return 0
             if choice == "a":
                 for r in state.rows:
