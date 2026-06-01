@@ -60,3 +60,19 @@ def test_unknown_function_key_is_ignored_not_eof():
 def test_ctrl_c_raises_keyboardinterrupt():
     with pytest.raises(KeyboardInterrupt):
         decode_key(feed(["\x03"]))
+
+
+from src.rename import read_key, raw_mode
+
+
+def test_read_key_delegates_to_decoder():
+    # Inject a getch so we don't touch a real terminal.
+    seq = iter(["\xe0", "M"])
+    assert read_key(_getch=lambda: next(seq, "")) == KEY_RIGHT
+
+
+def test_raw_mode_is_a_noop_context_when_not_a_tty(monkeypatch):
+    import sys
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    with raw_mode():  # must not raise even with no real terminal
+        pass

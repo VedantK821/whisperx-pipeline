@@ -7,6 +7,7 @@ transcription pipeline beyond the JSON segment shape.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import re
@@ -66,6 +67,66 @@ def decode_key(getch: Callable[[], str]) -> str:
     if ch in ("\x7f", "\x08"):
         return KEY_BACKSPACE
     return ch                              # printable (incl. " ")
+
+
+def read_key(_getch: Callable[[], str] | None = None) -> str:
+    """Block for one logical keypress and return a key token (KEY_* constant) or
+    a printable character. Raises KeyboardInterrupt on Ctrl-C; returns KEY_EOF on
+    closed stdin. Assumes the terminal is already in cbreak (see raw_mode()).
+
+    `_getch` is a test seam; production callers pass nothing.
+    """
+    if _getch is not None:
+        return decode_key(_getch)
+
+    if sys.platform == "win32":
+        import msvcrt
+
+        first = True
+
+        def getch() -> str:
+            nonlocal first
+            if first:
+                first = False
+                return msvcrt.getwch()        # blocking
+            return msvcrt.getwch() if msvcrt.kbhit() else ""  # buffered only
+
+        return decode_key(getch)
+
+    # POSIX: first byte blocking, follow-up bytes (for ESC sequences) opportunistic.
+    import select
+
+    first = True
+
+    def getch() -> str:
+        nonlocal first
+        if first:
+            first = False
+            return sys.stdin.read(1)
+        r, _, _ = select.select([sys.stdin], [], [], 0.05)
+        return sys.stdin.read(1) if r else ""
+
+    return decode_key(getch)
+
+
+@contextlib.contextmanager
+def raw_mode():
+    """Put the terminal into cbreak so single keys read immediately (POSIX).
+    No-op on Windows (msvcrt reads raw) and when stdin isn't a TTY. Restores
+    terminal settings on exit."""
+    if sys.platform == "win32" or not sys.stdin.isatty():
+        yield
+        return
+    import termios
+    import tty
+
+    fd = sys.stdin.fileno()
+    old = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        yield
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
 
 @dataclass
