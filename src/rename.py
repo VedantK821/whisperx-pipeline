@@ -367,6 +367,110 @@ def _fmt_mmss(seconds: float) -> str:
     return f"{m:02d}:{s:02d}"
 
 
+PLAY = "PLAY"  # effect token returned by RenameNav.step
+
+
+@dataclass
+class RenameNav:
+    """Pure state machine for the keyboard-native rename loop.
+
+    Feed it key tokens via step(); it owns the current speaker, the per-speaker
+    sample cursor, the live name buffer, and the accumulated mapping. step()
+    returns an effect token (currently only PLAY) or None. No terminal I/O —
+    that lives in interactive_rename.
+    """
+    examples: list[SpeakerExample]
+    speaker_idx: int = 0
+    sample_idxs: list[int] = field(default_factory=list)
+    name_buffer: str = ""
+    mapping: dict[str, str] = field(default_factory=dict)
+    finished: bool = False
+    aborted: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.sample_idxs:
+            self.sample_idxs = [0] * len(self.examples)
+
+    @property
+    def current(self) -> "SpeakerExample | None":
+        if 0 <= self.speaker_idx < len(self.examples):
+            return self.examples[self.speaker_idx]
+        return None
+
+    @property
+    def sample_idx(self) -> int:
+        if not self.examples:
+            return 0
+        return self.sample_idxs[self.speaker_idx]
+
+    def current_snippet(self) -> "Snippet | None":
+        ex = self.current
+        if not ex or not ex.snippets:
+            return None
+        return ex.snippets[self.sample_idx % len(ex.snippets)]
+
+    def _move_sample(self, delta: int) -> None:
+        ex = self.current
+        if not ex or not ex.snippets:
+            return
+        self.sample_idxs[self.speaker_idx] = (self.sample_idx + delta) % len(ex.snippets)
+
+    def _commit_and_advance(self) -> None:
+        ex = self.current
+        name = self.name_buffer.strip()
+        if ex and name:
+            self.mapping[ex.label] = name
+        self.name_buffer = ""
+        self.speaker_idx += 1
+        if self.speaker_idx >= len(self.examples):
+            self.finished = True
+
+    def step(self, key: str) -> str | None:
+        """Advance state by one key token. Returns PLAY or None."""
+        if self.finished or self.aborted:
+            return None
+
+        # Arrows flip samples in BOTH modes (they're never text).
+        if key == KEY_LEFT:
+            self._move_sample(-1)
+            return None
+        if key == KEY_RIGHT:
+            self._move_sample(+1)
+            return None
+
+        if key == KEY_EOF:
+            self.aborted = True
+            return None
+
+        if not self.name_buffer:  # ── command mode ──
+            if key == KEY_UP:
+                self.speaker_idx = max(0, self.speaker_idx - 1)
+            elif key == KEY_DOWN:
+                self.speaker_idx = min(len(self.examples) - 1, self.speaker_idx + 1)
+            elif key == " ":
+                return PLAY
+            elif key == KEY_ENTER:
+                self._commit_and_advance()   # empty buffer -> keep label, advance
+            elif key == KEY_ESC:
+                self.finished = True          # finish & save partial
+            elif len(key) == 1 and key.isprintable():
+                self.name_buffer = key        # start typing
+            return None
+
+        # ── typing mode ──
+        if key == KEY_ENTER:
+            self._commit_and_advance()
+        elif key == KEY_ESC:
+            self.name_buffer = ""             # cancel name, stay on speaker
+        elif key == KEY_BACKSPACE:
+            self.name_buffer = self.name_buffer[:-1]
+        elif key in (KEY_UP, KEY_DOWN):
+            pass                              # ignored while typing
+        elif len(key) == 1 and key.isprintable():
+            self.name_buffer += key
+        return None
+
+
 def _render_speaker_card(
     console,
     idx: int,
