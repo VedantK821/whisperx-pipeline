@@ -1,10 +1,11 @@
 # WhisperX transcription + diarization
 
 Local audio → speaker-labelled transcripts using [WhisperX](https://github.com/m-bain/whisperx).
-Built for two workflows:
+Built for three workflows:
 
-1. **Manual** — drop a file path on the CLI, get JSON / TXT / SRT back.
+1. **Manual** — pass a file to `src.app`, get JSON / TXT / SRT back.
 2. **Folder-watch** — point Syncthing (or anything else) at `incoming/`; the watcher transcribes new files as they finish syncing.
+3. **Phone ingest** — auto-pull stock Pixel Recorder recordings off an Android phone via a Tasker → Syncthing bridge. See [docs/runbooks/pixel-recorder-ingest.md](docs/runbooks/pixel-recorder-ingest.md).
 
 ## Layout
 
@@ -12,14 +13,17 @@ Built for two workflows:
 .
 ├── .env                 # your local config (copy from .env.example)
 ├── incoming/            # drop / sync audio files here
-├── transcripts/         # outputs land here ({name}.json, .txt, .srt)
+├── transcripts/         # outputs land here ({name}/{name}.json, .txt, .srt)
 ├── models/              # whisper + alignment model cache
+├── scripts/             # ops helpers (e.g. register the background watcher)
 ├── requirements.txt
 └── src/
     ├── config.py        # env-loaded settings
     ├── transcribe.py    # ASR + alignment + diarization pipeline
-    ├── cli.py           # one-shot CLI
-    └── watch.py         # incoming/ folder watcher
+    ├── watcher.py       # incoming/ filesystem-watch helpers
+    ├── rename.py        # interactive speaker naming
+    ├── ui.py            # terminal dashboard rendering
+    └── app.py           # TUI entrypoint (scan / transcribe / watch)
 ```
 
 ## Setup
@@ -43,28 +47,33 @@ Then edit `.env` and fill in `HF_TOKEN`. You also need to visit and click "Agree
 ## Manual transcription
 
 ```powershell
-.venv\Scripts\python -m src.cli "C:\path\to\recording.m4a"
-# or a whole folder, recursively
-.venv\Scripts\python -m src.cli .\incoming
+# transcribe a specific file
+.venv\Scripts\python -m src.app --files "C:\path\to\recording.m4a"
+# or scan everything sitting in incoming/
+.venv\Scripts\python -m src.app
 ```
 
-Outputs go to `transcripts\<basename>.{json,txt,srt}`.
+Outputs go to `transcripts\<basename>\<basename>.{json,txt,srt}`.
 
 ## Folder watcher (Syncthing target)
 
 ```powershell
 # process anything already in incoming/, then keep watching for new files:
-.venv\Scripts\python -m src.watch
+.venv\Scripts\python -m src.app -y --watch --no-review
 
-# one-shot drain:
-.venv\Scripts\python -m src.watch --once
+# one-shot drain (process new files, then exit):
+.venv\Scripts\python -m src.app -y --no-review
 ```
 
-Files already present at startup are processed first. New arrivals are queued, then the watcher waits 5s of file-size stability before transcribing — this lets Syncthing finish writing before we touch the file. Syncthing's `.syncthing.*.tmp` placeholders are ignored.
+Files already present at startup are processed first. New arrivals are queued, then the watcher waits 5s of file-size stability before transcribing — this lets Syncthing finish writing before we touch the file. Syncthing's `.syncthing.*.tmp` placeholders are ignored. Files that already have a transcript folder are skipped, so recordings may safely accumulate in `incoming/`.
 
 ### Syncthing setup (when you're ready)
 
-On the recorder side, share the recordings folder. On this machine, accept the share and set its destination to `C:\Projects\Whisperx\incoming` (or wherever you point `INCOMING_DIR` in `.env`). Recommended Syncthing folder settings on the receiver:
+On the recorder side, share the recordings folder. On this machine, accept the share and set its destination to `C:\Projects\Whisperx\incoming` (or wherever you point `INCOMING_DIR` in `.env`).
+
+The stock **Pixel Recorder** hides recordings in Android scoped storage that Syncthing can't read directly — use the Tasker bridge in [the phone-ingest runbook](docs/runbooks/pixel-recorder-ingest.md) to lift them into a syncable folder.
+
+Recommended Syncthing folder settings on the receiver:
 
 - **Folder Type:** Receive Only (the recorder is the source of truth)
 - **Ignore Permissions:** on (Windows ↔ Android compatibility)
@@ -74,17 +83,14 @@ Once a file finishes syncing, the watcher picks it up automatically.
 
 ### Run the watcher in the background (optional)
 
-Easiest path: a Scheduled Task that runs on logon. Quick version:
+Register a logon Scheduled Task with the bundled helper:
 
 ```powershell
-$task = "WhisperX Watcher"
-$action = New-ScheduledTaskAction `
-  -Execute "C:\Projects\Whisperx\.venv\Scripts\pythonw.exe" `
-  -Argument "-m src.watch" `
-  -WorkingDirectory "C:\Projects\Whisperx"
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -RunLevel Limited
+.\scripts\register-watcher-task.ps1
+Start-ScheduledTask -TaskName "WhisperX Watcher"   # start now without re-logon
 ```
+
+This launches `python -m src.app -y --watch --no-review` in a **minimized console**. (The Rich TUI can't run under console-less `pythonw.exe`, so we use a minimized window rather than a hidden process.)
 
 ## Configuration (`.env`)
 
@@ -102,11 +108,13 @@ Register-ScheduledTask -TaskName $task -Action $action -Trigger $trigger -RunLev
 
 ## Outputs
 
-For each `recording.ext`, three files land in `transcripts/`:
+For each `recording.ext`, three files land in `transcripts\recording\`:
 
 - **`recording.json`** — full WhisperX result, including per-word timestamps and speaker tags.
 - **`recording.txt`** — readable transcript: `[hh:mm:ss,mmm] SPEAKER_00: text`
 - **`recording.srt`** — subtitle file with speaker prefixes.
+
+Speaker labels start as `SPEAKER_00`, `SPEAKER_01`, … Run `python -m src.app` and press **`r`** to name them interactively; names persist and rewrite the outputs.
 
 ## Troubleshooting
 
