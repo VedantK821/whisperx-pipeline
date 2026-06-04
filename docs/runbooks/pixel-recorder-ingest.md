@@ -31,8 +31,11 @@ Import), then re-check the file path and the share variable as below.
 ### Build from scratch
 
 1. Create the folder `/sdcard/Download/WhisperXQueue` (any file manager).
-2. Enable Tasker → **Preferences → Action → Show Share Triggers** so Tasker shows
-   up in Android's share sheet.
+2. (Optional, recommended) Enable Tasker → **Preferences → "Direct Share Targets
+   Enabled"** so your named share trigger shows up directly in Android's share
+   sheet. Without it the flow still works — you just tap **Tasker** first, then
+   pick your trigger. The trigger's *name* comes from the Received Share profile
+   in the next step, not from a preferences screen.
 3. **Profile → Event → Received Share** (optionally add a Pixel Recorder App
    context to scope it). Free, no plugin.
    - *Fallback:* the **AutoShare** plugin (paid, one-time) exposes the shared
