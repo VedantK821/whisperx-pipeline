@@ -36,8 +36,13 @@ Import), then re-check the file path and the share variable as below.
    sheet. Without it the flow still works — you just tap **Tasker** first, then
    pick your trigger. The trigger's *name* comes from the Received Share profile
    in the next step, not from a preferences screen.
-3. **Profile → Event → Received Share** (optionally add a Pixel Recorder App
-   context to scope it). Free, no plugin.
+3. **Profile → Event → Received Share.** On the event form, fill **only**:
+   - **Share Trigger** = `WhisperX Ingest` (the name shown in the share sheet).
+   - **Package Name** = blank (or `com.google.android.apps.recorder` to scope it
+     to Pixel Recorder).
+   - **Output Variables** / everything else = leave default — the `%rs_*`
+     variables (incl. the audio URI) are created automatically.
+   Free, no plugin.
    - *Fallback:* the **AutoShare** plugin (paid, one-time) exposes the shared
      file as a real path `%asfile` — use it only if the `content://` copy below
      misbehaves.
