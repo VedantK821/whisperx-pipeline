@@ -73,6 +73,27 @@ def write_outputs(result: dict[str, Any], out_base: Path) -> None:
     out_base.with_suffix(".srt").write_text("\n".join(srt_lines), encoding="utf-8")
 
 
+def _load_align_model_with_fallback(language: str, device: str):
+    """Load the wav2vec2 alignment model for `language`; if none exists, retry
+    with English before giving up.
+
+    Whisper's language detection misfires on Indian-accent / code-switched
+    audio (one real meeting came back as 'jw' — Javanese), and whisperx has no
+    align model for such languages. Losing alignment entirely costs word-level
+    timing, which downstream breaks speaker-pure rename samples. The transcript
+    text in these cases is English anyway, so the English aligner is correct.
+    """
+    try:
+        return whisperx.load_align_model(language_code=language, device=device)
+    except Exception as e:
+        if language == "en":
+            raise
+        log.warning(
+            "No alignment model for %r (%s) — retrying with 'en'.", language, e
+        )
+        return whisperx.load_align_model(language_code="en", device=device)
+
+
 def _noop_stage(stage: str, info: dict[str, Any]) -> None:
     pass
 
@@ -141,8 +162,8 @@ def transcribe_file(
     cb(STAGE_ALIGN, {"language": detected_lang})
     try:
         log.info("Loading alignment model (%s)", detected_lang)
-        align_model, align_meta = whisperx.load_align_model(
-            language_code=detected_lang, device=cfg.device
+        align_model, align_meta = _load_align_model_with_fallback(
+            detected_lang, cfg.device
         )
         result = whisperx.align(
             result["segments"], align_model, align_meta, audio,
