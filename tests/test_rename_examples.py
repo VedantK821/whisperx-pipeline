@@ -32,14 +32,18 @@ def test_build_examples_counts_segments():
     assert by_label["SPEAKER_01"].segment_count == 2
 
 
-def test_build_examples_snippets_sorted_by_text_length_desc():
+def test_build_examples_snippets_prefer_sweet_spot_then_longer_text():
     segments = _load("transcript_two_speakers.json")
     examples = build_speaker_examples(segments)
 
     speaker0 = next(e for e in examples if e.label == "SPEAKER_00")
-    assert speaker0.snippets[0].text.startswith("this is a longer segment")
-    lengths = [len(s.text) for s in speaker0.snippets]
-    assert lengths == sorted(lengths, reverse=True)
+    texts = [s.text for s in speaker0.snippets]
+    # Both 5s segments sit in the 3-6s sweet spot and outrank the 10s one
+    # (trimmed to the sample window); ties prefer longer text.
+    assert texts[0] == "speaker zero again briefly"
+    assert texts[1] == "hello"
+    assert texts[2].startswith("this is a longer segment")
+    assert texts[2].endswith("…")
 
 
 def test_build_examples_skips_segments_without_speaker():

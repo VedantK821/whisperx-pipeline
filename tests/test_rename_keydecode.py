@@ -95,3 +95,26 @@ def test_read_key_waits_for_lagging_arrow_followup_byte(monkeypatch):
     monkeypatch.setattr(r.time, "sleep", lambda s: None)
 
     assert r.read_key() == KEY_RIGHT
+
+
+def test_read_key_decodes_arrow_even_when_kbhit_never_fires(monkeypatch):
+    # The real CRT behavior (verified on a live console): getwch() returns the
+    # \xe0 prefix and stashes the trail code in the CRT's internal pushback
+    # buffer, which kbhit() can NOT see — it only checks the console event
+    # queue. kbhit() stays False forever while a blocking getwch() returns the
+    # trail code instantly. read_key must therefore read the trail byte
+    # unconditionally, not gate it on kbhit(); otherwise every arrow press
+    # decodes as UNKNOWN and the buffered 'K' gets typed as a letter next.
+    import src.rename as r
+    if r.sys.platform != "win32":
+        pytest.skip("windows-specific console input path")
+    import msvcrt
+
+    getwch_seq = iter(["\xe0", "K"])
+    monkeypatch.setattr(msvcrt, "getwch", lambda: next(getwch_seq))
+    monkeypatch.setattr(msvcrt, "kbhit", lambda: False)  # CRT buffer invisible
+    monkeypatch.setattr(r.time, "sleep", lambda s: None)
+
+    assert r.read_key() == KEY_LEFT
+    with pytest.raises(StopIteration):
+        next(getwch_seq)  # both bytes consumed — nothing left to leak

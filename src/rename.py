@@ -82,21 +82,32 @@ def read_key(_getch: Callable[[], str] | None = None) -> str:
     if sys.platform == "win32":
         import msvcrt
 
-        first = True
+        prev: str | None = None
 
         def getch() -> str:
-            nonlocal first
-            if first:
-                first = False
-                return msvcrt.getwch()        # blocking — wait for the first key
-            # Follow-up byte of a multi-key sequence (e.g. the code after an
-            # \xe0/\x00 arrow prefix). It arrives almost instantly, but kbhit()
-            # can briefly lag — so poll for a short window instead of giving up
-            # immediately and letting the stray byte get typed as a letter.
+            nonlocal prev
+            if prev is None:
+                prev = msvcrt.getwch()        # blocking — wait for the first key
+                return prev
+            if prev in ("\x00", "\xe0"):
+                # The trail code of a function/arrow key sits in the CRT's
+                # internal pushback buffer, which kbhit() can NOT see — it
+                # only checks the console event queue (verified on a real
+                # console: kbhit() stays False while a blocking getwch()
+                # returns the code instantly). Gating this read on kbhit()
+                # makes the trail byte leak into the next read and get typed
+                # as a letter. The prefix is never delivered without its
+                # trail, so a blocking read is safe.
+                prev = msvcrt.getwch()
+                return prev
+            # Follow-up of an ESC-style sequence (VT input mode): genuinely
+            # new console events, which kbhit() does see — poll briefly,
+            # otherwise it was a lone ESC.
             deadline = time.monotonic() + 0.05
             while time.monotonic() < deadline:
                 if msvcrt.kbhit():
-                    return msvcrt.getwch()
+                    prev = msvcrt.getwch()
+                    return prev
                 time.sleep(0.002)
             return ""                          # genuinely nothing more (lone ESC)
 
@@ -157,13 +168,17 @@ class SpeakerExample:
 _SAMPLE_MIN_S = 1.2        # drop runs shorter than this (a one-word "Yeah.")
 _SAMPLE_MAX_S = 6.0        # trim a clean run to about this many seconds
 _SAMPLES_PER_SPEAKER = 6   # samples offered per speaker (flip with ← →)
+_RUN_GAP_S = 1.0           # a silence this long inside a run = someone else's turn
+_MIN_CHARS_PER_S = 3.0     # below this the timing is an alignment artifact
 
 
 def _speaker_pure_runs(words: list[dict], label: str) -> list[list[dict]]:
     """Split `words` into maximal contiguous runs spoken by `label`. A word
-    tagged as a different speaker, or one missing timing, ends the current run;
-    untagged words continue it (alignment occasionally drops the tag). Returns
-    [] when there's no usable word-level timing."""
+    tagged as a different speaker, one missing timing, or a time gap of more
+    than _RUN_GAP_S since the previous word (untranscribed audio — usually
+    another speaker or dead air) ends the current run; untagged words continue
+    it (alignment occasionally drops the tag). Returns [] when there's no
+    usable word-level timing."""
     runs: list[list[dict]] = []
     cur: list[dict] = []
     for word in words:
@@ -175,6 +190,9 @@ def _speaker_pure_runs(words: list[dict], label: str) -> list[list[dict]]:
                 runs.append(cur)
                 cur = []
             continue
+        if cur and float(word["start"]) - float(cur[-1]["end"]) > _RUN_GAP_S:
+            runs.append(cur)
+            cur = []
         cur.append(word)
     if cur:
         runs.append(cur)
@@ -196,52 +214,82 @@ def _snippet_from_run(run: list[dict]) -> "Snippet | None":
     return Snippet(text=text, start=float(kept[0]["start"]), end=float(kept[-1]["end"]))
 
 
+def _duration_band(dur: float) -> float:
+    """0.0 inside the 3-6s sweet spot, growing with the distance outside it."""
+    if dur < 3.0:
+        return 3.0 - dur
+    if dur > _SAMPLE_MAX_S:
+        return dur - _SAMPLE_MAX_S
+    return 0.0
+
+
 def _sample_rank(sn: "Snippet") -> tuple[float, int]:
     """Sort key: prefer samples inside the 3-6s sweet spot, then longer text."""
-    dur = sn.end - sn.start
-    if dur < 3.0:
-        band = 3.0 - dur
-    elif dur > _SAMPLE_MAX_S:
-        band = dur - _SAMPLE_MAX_S
-    else:
-        band = 0.0
-    return (band, -len(sn.text))
+    return (_duration_band(sn.end - sn.start), -len(sn.text))
+
+
+def _trimmed_segment_snippet(s: dict) -> "Snippet | None":
+    """Whole-segment snippet for the no-word-timing fallback. Long segments
+    are trimmed to _SAMPLE_MAX_S with the text cut proportionally at a word
+    boundary (marked with an ellipsis), so the shown quote roughly matches the
+    window that will be played instead of dwarfing it."""
+    text = (s.get("text") or "").strip()
+    if not text:
+        return None
+    start = float(s.get("start", 0))
+    end = float(s.get("end", 0))
+    dur = end - start
+    if dur <= _SAMPLE_MAX_S:
+        return Snippet(text=text, start=start, end=end)
+    keep = max(1, int(len(text) * (_SAMPLE_MAX_S / dur)))
+    cut = text.rfind(" ", 0, keep + 1)
+    if cut <= 0:
+        cut = keep
+    return Snippet(text=text[:cut].rstrip() + " …", start=start, end=start + _SAMPLE_MAX_S)
 
 
 def _build_speaker_snippets(segs: list[dict], label: str) -> list[Snippet]:
     """Preferred: speaker-pure, trimmed samples from word-level timing, ranked
-    toward the ~3-6s sweet spot. Falls back to whole-segment samples (longest
-    first) when no word timing exists (e.g. alignment was unavailable)."""
+    toward the ~3-6s sweet spot. Falls back to trimmed per-segment samples when
+    no word timing exists (e.g. alignment was unavailable), preferring segments
+    already near the sweet spot — a short natural segment beats a trimmed 30s
+    blob, which is likelier to contain other speakers."""
     pure: list[Snippet] = []
     for s in segs:
         for run in _speaker_pure_runs(s.get("words") or [], label):
             sn = _snippet_from_run(run)
-            if sn and (sn.end - sn.start) >= _SAMPLE_MIN_S:
-                pure.append(sn)
+            if not sn:
+                continue
+            dur = sn.end - sn.start
+            if dur < _SAMPLE_MIN_S:
+                continue
+            if len(sn.text) / dur < _MIN_CHARS_PER_S:
+                continue  # e.g. one word "aligned" across 9s of other audio
+            pure.append(sn)
 
     if pure:
         pure.sort(key=_sample_rank)
         return pure[:_SAMPLES_PER_SPEAKER]
 
-    snippets = [
-        Snippet(
-            text=(s.get("text") or "").strip(),
-            start=float(s.get("start", 0)),
-            end=float(s.get("end", 0)),
-        )
-        for s in segs
-        if (s.get("text") or "").strip()
-    ]
-    snippets.sort(key=lambda sn: len(sn.text), reverse=True)
-    return snippets
+    ranked: list[tuple[float, Snippet]] = []
+    for s in segs:
+        sn = _trimmed_segment_snippet(s)
+        if sn is None:
+            continue
+        # Rank by the segment's ORIGINAL duration: a naturally short segment
+        # outranks a long one we had to trim, even though both end up ~6s.
+        ranked.append((float(s.get("end", 0)) - float(s.get("start", 0)), sn))
+    ranked.sort(key=lambda t: (_duration_band(t[0]), -len(t[1].text)))
+    return [sn for _, sn in ranked[:_SAMPLES_PER_SPEAKER]]
 
 
 def build_speaker_examples(segments: list[dict]) -> list[SpeakerExample]:
     """Group segments by speaker. Return examples sorted by total speaking time
     (descending). Each example's `snippets` are speaker-pure samples trimmed to
     a ~3-6s window (so played audio matches the shown text and contains only the
-    target speaker); without word-level timing they fall back to whole-segment
-    samples, longest first. Segments without a `speaker` field are skipped.
+    target speaker); without word-level timing they fall back to per-segment
+    samples trimmed to the same window, preferring segments already near it.
+    Segments without a `speaker` field are skipped.
     """
     grouped: dict[str, list[dict]] = {}
     for seg in segments:
@@ -292,6 +340,78 @@ def unmapped_speakers(segments: list[dict]) -> list[str]:
     return list(seen.keys())
 
 
+# ─── Unassigned (SPEAKER_??) lines ────────────────────────────────────────────
+# whisperx leaves a segment with no `speaker` when diarization attributed it to
+# no cluster; write_outputs renders those as SPEAKER_??. These helpers find such
+# gaps, group adjacent ones, and let the user fold each run into a known speaker.
+
+@dataclass
+class UnassignedRun:
+    """A contiguous run of no-speaker segments, grouped for one decision."""
+    indices: list[int]
+    start: float
+    end: float
+    text: str
+    line_count: int
+
+
+def unassigned_segments(segments: list[dict]) -> list[int]:
+    """Indices of segments with no usable `speaker` (None/missing/empty) — the
+    lines rendered as SPEAKER_?? in the outputs."""
+    return [i for i, seg in enumerate(segments) if not seg.get("speaker")]
+
+
+def group_contiguous(indices: list[int]) -> list[list[int]]:
+    """Split a sorted index list into runs of consecutive integers."""
+    runs: list[list[int]] = []
+    for i in indices:
+        if runs and i == runs[-1][-1] + 1:
+            runs[-1].append(i)
+        else:
+            runs.append([i])
+    return runs
+
+
+def build_unassigned_runs(segments: list[dict]) -> list[UnassignedRun]:
+    """Group the SPEAKER_?? segments into contiguous runs, each carrying its
+    combined text and time span (for display + audio playback)."""
+    runs: list[UnassignedRun] = []
+    for group in group_contiguous(unassigned_segments(segments)):
+        segs = [segments[i] for i in group]
+        text = " ".join((s.get("text") or "").strip() for s in segs).strip()
+        runs.append(UnassignedRun(
+            indices=group,
+            start=float(segs[0].get("start", 0.0)),
+            end=float(segs[-1].get("end", 0.0)),
+            text=text,
+            line_count=len(group),
+        ))
+    return runs
+
+
+def candidate_speakers(segments: list[dict]) -> list[str]:
+    """Distinct current speaker labels (named or SPEAKER_XX) a ?? run could be
+    assigned to, ordered by total speaking time descending."""
+    totals: dict[str, float] = {}
+    for seg in segments:
+        spk = seg.get("speaker")
+        if not spk:
+            continue
+        totals[spk] = totals.get(spk, 0.0) + (
+            float(seg.get("end", 0.0)) - float(seg.get("start", 0.0))
+        )
+    return sorted(totals, key=lambda s: totals[s], reverse=True)
+
+
+def assign_segments_speaker(segments: list[dict], indices: list[int], name: str) -> None:
+    """Set `speaker = name` on the given segments and their nested words."""
+    for i in indices:
+        seg = segments[i]
+        seg["speaker"] = name
+        for w in seg.get("words", []) or []:
+            w["speaker"] = name
+
+
 def _persist_path(transcript_dir: Path, stem: str) -> Path:
     return transcript_dir / f"{stem}.speakers.json"
 
@@ -339,6 +459,7 @@ class RenamePending:
     transcript_json: Path
     audio_path: Path | None
     unmapped: list[str]
+    unassigned_count: int = 0
 
 
 def _find_audio_for_stem(incoming_dir: Path, stem: str) -> Path | None:
@@ -427,12 +548,12 @@ def wait_for_keypress(timeout: float) -> str | None:
         while time.monotonic() < deadline:
             if msvcrt.kbhit():
                 ch = msvcrt.getwch()
-                # Function/arrow keys produce a two-char sequence; consume the
-                # second byte so the next prompt isn't polluted.
+                # Function/arrow keys produce a two-char sequence; the trail
+                # code sits in the CRT pushback buffer, which kbhit() cannot
+                # see — consume it with an unconditional blocking read so it
+                # can't leak into the next prompt as a typed letter.
                 if ch in ("\x00", "\xe0"):
-                    if msvcrt.kbhit():
-                        msvcrt.getwch()
-                    return ch
+                    msvcrt.getwch()
                 return ch
             time.sleep(0.03)
         return None
@@ -452,7 +573,15 @@ def wait_for_keypress(timeout: float) -> str | None:
                 return None
             r, _, _ = select.select([sys.stdin], [], [], min(remaining, 0.1))
             if r:
-                return sys.stdin.read(1)
+                ch = sys.stdin.read(1)
+                if ch == "\x1b":
+                    # Drain the escape-sequence tail (arrows = ESC [ A) so the
+                    # stray bytes don't leak into the next reader as letters.
+                    for _ in range(8):
+                        if not select.select([sys.stdin], [], [], 0.01)[0]:
+                            break
+                        sys.stdin.read(1)
+                return ch
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
@@ -564,6 +693,105 @@ class RenameNav:
             pass                              # ignored while typing
         elif len(key) == 1 and key.isprintable():
             self.name_buffer += key
+        return None
+
+
+@dataclass
+class UnassignedNav:
+    """Pure state machine for assigning SPEAKER_?? runs to a known speaker.
+
+    Unlike RenameNav (where you *type* a new name per cluster), here you mostly
+    *pick* from an existing list, so command-mode digits map to candidates.
+    Modes: 'command' (default), 'typing' (after `n`, type a fresh name),
+    'pick_all' (after `a`, the next digit applies to every remaining run).
+    step() returns PLAY or None; no terminal I/O.
+    """
+    runs: list[UnassignedRun]
+    candidates: list[str]
+    run_idx: int = 0
+    decisions: dict[int, str] = field(default_factory=dict)
+    name_buffer: str = ""
+    mode: str = "command"
+    finished: bool = False
+    aborted: bool = False
+
+    def __post_init__(self) -> None:
+        if not self.runs:
+            self.finished = True
+
+    @property
+    def current(self) -> "UnassignedRun | None":
+        if 0 <= self.run_idx < len(self.runs):
+            return self.runs[self.run_idx]
+        return None
+
+    def _advance(self) -> None:
+        self.run_idx += 1
+        if self.run_idx >= len(self.runs):
+            self.finished = True
+
+    def _assign_current(self, name: str) -> None:
+        self.decisions[self.run_idx] = name
+        self._advance()
+
+    def step(self, key: str) -> "str | None":
+        if self.finished or self.aborted:
+            return None
+
+        if key == KEY_EOF:
+            self.aborted = True
+            return None
+
+        if self.mode == "typing":
+            if key == KEY_ENTER:
+                name = self.name_buffer.strip()
+                self.name_buffer = ""
+                self.mode = "command"
+                if name:
+                    self._assign_current(name)
+            elif key == KEY_ESC:
+                self.name_buffer = ""
+                self.mode = "command"
+            elif key == KEY_BACKSPACE:
+                self.name_buffer = self.name_buffer[:-1]
+            elif len(key) == 1 and key.isprintable():
+                self.name_buffer += key
+            return None
+
+        if self.mode == "pick_all":
+            if key == KEY_ESC:
+                self.mode = "command"
+            elif len(key) == 1 and key.isdigit():
+                idx = int(key) - 1
+                if 0 <= idx < len(self.candidates):
+                    name = self.candidates[idx]
+                    for j in range(self.run_idx, len(self.runs)):
+                        self.decisions.setdefault(j, name)
+                    self.mode = "command"
+                    self.run_idx = len(self.runs)
+                    self.finished = True
+            return None
+
+        # ── command mode ──
+        if key == " ":
+            return PLAY
+        if key == KEY_UP:
+            self.run_idx = max(0, self.run_idx - 1)
+        elif key == KEY_DOWN:
+            self.run_idx = min(len(self.runs) - 1, self.run_idx + 1)
+        elif key == KEY_ESC:
+            self.finished = True
+        elif key == "s":
+            self._advance()
+        elif key == "n":
+            self.mode = "typing"
+            self.name_buffer = ""
+        elif key == "a":
+            self.mode = "pick_all"
+        elif len(key) == 1 and key.isdigit():
+            idx = int(key) - 1
+            if 0 <= idx < len(self.candidates):
+                self._assign_current(self.candidates[idx])
         return None
 
 
@@ -722,6 +950,121 @@ def interactive_rename(
     return None if nav.aborted else nav.mapping
 
 
+def _render_unassigned_card(nav: "UnassignedNav", can_play: bool):
+    """Rich Panel for the SPEAKER_?? reassignment loop. Pure render."""
+    from rich.console import Group
+    from rich.panel import Panel
+    from rich.text import Text
+
+    total = len(nav.runs)
+    run = nav.current
+    if run is None:  # finished — advanced past the last run
+        return Panel(
+            Text("✓ unassigned lines done", style="spring_green2 bold"),
+            title=Text(f"[ Unassigned ?? — {total} / {total} ]", style="magenta1 bold"),
+            title_align="left", border_style="magenta1", padding=(0, 1),
+        )
+
+    parts: list[Text] = [
+        Text(f"{_fmt_mmss(run.start)}–{_fmt_mmss(run.end)}   {run.line_count} line(s)",
+             style="bold magenta1"),
+        Text(""),
+        Text(f'"{run.text}"' if run.text else "(no text)", style="bright_cyan"),
+        Text(""),
+    ]
+
+    if nav.candidates:
+        choices = Text("Assign to:  ", style="bold")
+        for i, name in enumerate(nav.candidates, 1):
+            choices.append(f"[{i}] {name}   ", style="bright_white")
+        parts.append(choices)
+    else:
+        parts.append(Text("(no named speakers yet — use [n] to name)", style="dim"))
+
+    if nav.mode == "typing":
+        name_line = Text("New name: ", style="bold")
+        name_line.append(nav.name_buffer, style="bright_white")
+        name_line.append("▍", style="bright_white")
+        parts.append(name_line)
+    elif nav.mode == "pick_all":
+        parts.append(Text("Apply to ALL remaining — press a number", style="bold yellow1"))
+
+    parts.append(Text(""))
+    hints = Text("1-9 assign", style="dim")
+    if can_play:
+        hints.append("   ␣ play", style="dim")
+    hints.append("   ↑↓ move   s skip   n new   a all   esc done", style="dim")
+    parts.append(hints)
+
+    return Panel(
+        Group(*parts),
+        title=Text(f"[ Unassigned ?? — {nav.run_idx + 1} / {total} ]", style="magenta1 bold"),
+        title_align="left", border_style="magenta1", padding=(0, 1),
+    )
+
+
+def reassign_unassigned(
+    runs: list["UnassignedRun"],
+    candidates: list[str],
+    audio_path: Path | None,
+    console,
+    *,
+    ffplay_available: bool,
+) -> "dict[int, str] | None":
+    """Interactively fold SPEAKER_?? runs into a chosen speaker.
+
+    Returns {run_index: name} for runs actually assigned, {} if none (or no TTY),
+    or None if the user aborted (Ctrl-C / EOF). TTY-only — skipped when stdin is
+    not a terminal (the unattended watcher must never block here).
+    """
+    if not runs or not sys.stdin.isatty():
+        return {}
+
+    from rich.live import Live
+
+    can_play = ffplay_available and audio_path is not None and audio_path.exists()
+    nav = UnassignedNav(runs=runs, candidates=candidates)
+    player: "subprocess.Popen | None" = None
+
+    def _stop_player() -> None:
+        nonlocal player
+        if player is not None and player.poll() is None:
+            try:
+                player.terminate()
+            except OSError:
+                pass
+        player = None
+
+    try:
+        with raw_mode(), Live(
+            _render_unassigned_card(nav, can_play),
+            console=console, refresh_per_second=12, screen=False, transient=False,
+        ) as live:
+            while not nav.finished and not nav.aborted:
+                live.update(_render_unassigned_card(nav, can_play))
+                try:
+                    key = read_key()
+                except KeyboardInterrupt:
+                    return None
+                prev_idx = nav.run_idx
+                effect = nav.step(key)
+                # Cut audio the instant the displayed run changes (or we exit).
+                if nav.run_idx != prev_idx or nav.finished or nav.aborted:
+                    _stop_player()
+                if effect == PLAY and can_play:
+                    run = nav.current
+                    if run is not None:
+                        _stop_player()
+                        clip = min(10.0, max(0.5, run.end - run.start))
+                        player = play_snippet(audio_path, run.start, duration=clip)
+    except (EOFError, KeyboardInterrupt):
+        return None
+    finally:
+        _stop_player()
+
+    return None if nav.aborted else nav.decisions
+
+
 def _interactive_rename_lines(
     examples: list["SpeakerExample"],
     audio_path: Path | None,
@@ -800,11 +1143,13 @@ def find_rename_pending(
             continue
         segments = data.get("segments") or []
         labels = unmapped_speakers(segments)
-        if not labels:
+        unassigned = unassigned_segments(segments)
+        if not labels and not unassigned:
             continue
         pending.append(RenamePending(
             transcript_json=json_path,
             audio_path=_find_audio_for_stem(incoming_dir, json_path.stem),
             unmapped=labels,
+            unassigned_count=len(unassigned),
         ))
     return pending

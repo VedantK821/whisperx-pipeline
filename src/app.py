@@ -16,12 +16,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import logging
 import sys
 import time
 import warnings
 from dataclasses import dataclass, field
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Event, Lock, Thread
@@ -54,6 +56,56 @@ def _silence_noisy_libraries() -> None:
     warnings.filterwarnings("ignore", category=UserWarning)
     warnings.filterwarnings("ignore", category=FutureWarning)
     warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+
+# Module-level reference so the faulthandler dump file is not garbage-collected
+# (and thus closed) for the lifetime of the process.
+_fault_log = None
+
+
+def _setup_logging(verbose: bool) -> Path:
+    """Configure console logging plus a persistent file log and crash dump.
+
+    The console keeps its old behaviour (WARNING, or DEBUG with -v). On top of
+    that we always attach a RotatingFileHandler that writes DEBUG-level detail to
+    logs/whisperx.log. The file handler writes straight to the file descriptor,
+    so — unlike the console stream — the Rich Live TUI's `redirect_stderr=True`
+    cannot swallow it. That is what lets us see *where* a batch run died.
+
+    faulthandler dumps a native stack to logs/crash.log on a fatal signal
+    (SIGSEGV/SIGABRT/…). A CUDA/torch crash bypasses Python's try/except entirely,
+    so this is the only way such a death leaves a trail.
+
+    Returns the path of the main log file.
+    """
+    global _fault_log
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_file = LOG_DIR / "whisperx.log"
+
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)  # handlers decide what actually gets emitted
+    root.handlers.clear()         # drop any basicConfig/prior-run handlers
+
+    stream = logging.StreamHandler()
+    stream.setLevel(logging.DEBUG if verbose else logging.WARNING)
+    stream.setFormatter(fmt)
+    root.addHandler(stream)
+
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=2_000_000, backupCount=5, encoding="utf-8"
+    )
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
+
+    _fault_log = open(LOG_DIR / "crash.log", "a", encoding="utf-8")
+    faulthandler.enable(file=_fault_log, all_threads=True)
+
+    return log_file
 
 
 from rich.console import Console, Group
@@ -267,7 +319,8 @@ def run_one(
         out_json = cfg.transcripts_dir / row.path.stem / f"{row.path.stem}.json"
         try:
             data = json.loads(out_json.read_text(encoding="utf-8"))
-            if rename.unmapped_speakers(data.get("segments") or []):
+            segs = data.get("segments") or []
+            if rename.unmapped_speakers(segs) or rename.unassigned_segments(segs):
                 with state.lock:
                     state.rename_pending.append(row)
         except (OSError, json.JSONDecodeError):
@@ -288,10 +341,12 @@ def _run_rename_for_transcript(
     *,
     ffplay_avail: bool,
 ) -> None:
-    """Post-hoc rename for a single transcript. Used by both
-    post-batch catch-up and the startup `r` option.
+    """Post-hoc rename for a single transcript: name the diarized speakers, then
+    fold any SPEAKER_?? lines into a known speaker, and re-emit outputs once.
+    Used by both the post-batch catch-up and the startup `r` option.
     """
     from . import rename
+    from .transcribe import write_outputs
 
     stem = transcript_json.stem
     out_dir = transcript_json.parent
@@ -307,25 +362,50 @@ def _run_rename_for_transcript(
         rename.apply_speaker_mapping(segments, persisted)
 
     remaining = rename.unmapped_speakers(segments)
-    if not remaining:
+    runs = rename.build_unassigned_runs(segments)
+    if not remaining and not runs:
         console.print(f"[{ui.DIM}]{stem}: nothing to rename.[/{ui.DIM}]")
         return
 
-    examples = [e for e in rename.build_speaker_examples(segments) if e.label in remaining]
     audio_for_play = audio_path if (audio_path and audio_path.exists()) else None
+    can_play = ffplay_avail and audio_for_play is not None
     console.rule(f"[{ui.NEON_MAGENTA} bold]Renaming {stem}[/{ui.NEON_MAGENTA} bold]")
-    mapping = rename.interactive_rename(
-        examples, audio_for_play, console,
-        ffplay_available=ffplay_avail and audio_for_play is not None,
-    )
-    if not mapping:
+
+    # 1) Name the diarized speakers.
+    new_mapping: dict[str, str] = {}
+    if remaining:
+        examples = [e for e in rename.build_speaker_examples(segments) if e.label in remaining]
+        mapping = rename.interactive_rename(
+            examples, audio_for_play, console, ffplay_available=can_play,
+        )
+        if mapping is None:   # aborted
+            return
+        new_mapping = mapping
+        rename.apply_speaker_mapping(segments, new_mapping)
+
+    # 2) Fold the SPEAKER_?? runs into a known speaker.
+    decided = 0
+    if runs:
+        candidates = rename.candidate_speakers(segments)
+        decisions = rename.reassign_unassigned(
+            runs, candidates, audio_for_play, console, ffplay_available=can_play,
+        )
+        if decisions:
+            for run_idx, name in decisions.items():
+                rename.assign_segments_speaker(segments, runs[run_idx].indices, name)
+            decided = len(decisions)
+
+    if not new_mapping and not decided:
+        console.print(f"[{ui.DIM}]{stem}: no changes.[/{ui.DIM}]")
         return
 
-    merged = dict(persisted or {})
-    merged.update(mapping)
-    audio_filename = audio_path.name if audio_path else f"{stem}.audio"
-    rename.save_persisted_mapping(out_dir, stem, audio_filename, merged)
-    rename.rewrite_outputs_with_mapping(transcript_json, merged)
+    # 3) Persist the label->name mapping and re-emit all outputs once.
+    if new_mapping:
+        merged = dict(persisted or {})
+        merged.update(new_mapping)
+        audio_filename = audio_path.name if audio_path else f"{stem}.audio"
+        rename.save_persisted_mapping(out_dir, stem, audio_filename, merged)
+    write_outputs(data, transcript_json.with_suffix(""))
     console.print(f"[{ui.NEON_GREEN}]✓ Rewrote outputs for {stem}.[/{ui.NEON_GREEN}]")
 
 
@@ -356,9 +436,14 @@ def _render_pending_list(pending: list) -> "Any":
     t.add_column(style=ui.NEON_YELLOW, no_wrap=True)
     t.add_column(style=ui.DIM, no_wrap=True)
     for i, p in enumerate(pending, 1):
-        n = len(p.unmapped)
+        bits = []
+        if p.unmapped:
+            bits.append(f"{len(p.unmapped)} unnamed")
+        if p.unassigned_count:
+            bits.append(f"{p.unassigned_count} ??")
+        status = " · ".join(bits) or "—"
         audio = "♪ audio" if p.audio_path else "— no audio"
-        t.add_row(str(i), p.transcript_json.stem, f"{n} unnamed", audio)
+        t.add_row(str(i), p.transcript_json.stem, status, audio)
 
     return Panel(
         t,
@@ -411,7 +496,7 @@ def _post_batch_catchup(state: LiveState, cfg: Config, *, ffplay_avail: bool) ->
     if not pending:
         return
 
-    prompt_msg = (f"\n[bold]{len(pending)} file(s) still have unnamed speakers. "
+    prompt_msg = (f"\n[bold]{len(pending)} file(s) still need speaker cleanup. "
                   f"Rename now?[/bold] "
                   f"[[{ui.NEON_CYAN}]Y[/{ui.NEON_CYAN}]]es / "
                   f"[[{ui.DIM}]n[/{ui.DIM}]]o")
@@ -653,12 +738,11 @@ def main(argv: list[str] | None = None) -> int:
                              "new files (0 = start immediately; default: 3).")
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.DEBUG if args.verbose else logging.WARNING,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
+    log_file = _setup_logging(args.verbose)
     if not args.verbose:
         _silence_noisy_libraries()
+    log.info("=== run start: argv=%s ===", argv if argv is not None else sys.argv[1:])
+    console.print(f"[{ui.DIM}]Logging to {log_file}[/{ui.DIM}]")
 
     cfg = Config.load()
     state = LiveState()
