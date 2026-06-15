@@ -10,10 +10,20 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import subprocess
 from pathlib import Path
 
 from . import rename
+
+
+def _finite_vec(vec) -> bool:
+    """True iff vec is a non-empty list of finite numbers (drops NaN/inf embeddings
+    that degenerate/near-silent clips can produce — they'd be invalid JSON + useless)."""
+    return (
+        isinstance(vec, list) and len(vec) > 0
+        and all(isinstance(x, (int, float)) and math.isfinite(x) for x in vec)
+    )
 
 log = logging.getLogger(__name__)
 
@@ -63,11 +73,16 @@ def export_speaker_artifacts(
     """
     stem = audio_path.stem
     clips = export_clips(segments, audio_path, out_dir / "clips")
-    payload = {"embeddings": embeddings or {}, "clips": clips}
+    clean = {k: v for k, v in (embeddings or {}).items() if _finite_vec(v)}
+    dropped = [k for k in (embeddings or {}) if k not in clean]
+    if dropped:
+        log.warning("dropped %d non-finite embedding(s): %s", len(dropped), dropped)
+    payload = {"embeddings": clean, "clips": clips}
+    # allow_nan=False = hard guarantee the file is valid JSON (JS JSON.parse rejects NaN).
     (out_dir / f"{stem}.embeddings.json").write_text(
-        json.dumps(payload, indent=2), encoding="utf-8"
+        json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8"
     )
     log.info(
-        "Exported %d embeddings, %d clips for %s",
-        len(payload["embeddings"]), len(clips), stem,
+        "Exported %d embeddings (%d dropped), %d clips for %s",
+        len(clean), len(dropped), len(clips), stem,
     )
