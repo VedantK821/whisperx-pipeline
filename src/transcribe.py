@@ -4,6 +4,7 @@ from __future__ import annotations
 import gc
 import json
 import logging
+import os
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -16,6 +17,18 @@ from .config import Config
 log = logging.getLogger(__name__)
 
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma", ".mp4", ".mkv", ".webm"}
+
+# Domain vocabulary primer — biases Whisper toward the team's names/products/tools so it
+# stops mis-hearing jargon (e.g. "Micro Insurance" -> "microwave insurance"). Overridable
+# via the INITIAL_PROMPT env var. Kept well under Whisper's ~224-token prompt budget.
+DEFAULT_INITIAL_PROMPT = (
+    "Meeting of the acme health-insurance product team in India. "
+    "People: Vedant, Alice, Bob, Morgan, Taylor, Jordan, Sam, Casey, Riley, "
+    "Alex, Priya, Jesse, Robin, Northwind. "
+    "Tools and products: Adobe XD, Figma, Micro Insurance, SafeCare, SafeCare Duo, "
+    "SafeCare Max, Acme Health, Wellsprings, ShieldPlus, personal accident insurance, "
+    "telemedicine, sum insured, EMI, premium, policy, brochure, claim."
+)
 
 # Pipeline stage names — kept here so the UI and pipeline agree on labels.
 STAGE_LOAD = "LOAD"
@@ -141,6 +154,7 @@ def transcribe_file(
         compute_type=cfg.compute_type,
         download_root=str(cfg.models_dir),
         language=cfg.language,
+        asr_options={"initial_prompt": (os.getenv("INITIAL_PROMPT", "").strip() or DEFAULT_INITIAL_PROMPT)},
     )
     result = asr_model.transcribe(
         audio,
