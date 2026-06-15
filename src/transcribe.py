@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import whisperx
+import whisperx.diarize  # ensure the diarize submodule is loaded (whisperx does not auto-import it)
 
 from .config import Config
 
@@ -177,6 +178,7 @@ def transcribe_file(
                     detected_lang, e)
 
     cb(STAGE_DIARIZE, {})
+    speaker_embeddings: "dict[str, list[float]] | None" = None
     if cfg.hf_token:
         try:
             log.info("Running diarization")
@@ -184,13 +186,13 @@ def transcribe_file(
             if cfg.diarize_model:
                 diarize_kwargs_init["model_name"] = cfg.diarize_model
             diarize_pipeline = whisperx.diarize.DiarizationPipeline(**diarize_kwargs_init)
-            diarize_kwargs: dict[str, Any] = {}
+            diarize_kwargs: dict[str, Any] = {"return_embeddings": True}
             if cfg.min_speakers is not None:
                 diarize_kwargs["min_speakers"] = cfg.min_speakers
             if cfg.max_speakers is not None:
                 diarize_kwargs["max_speakers"] = cfg.max_speakers
             diarize_kwargs["progress_callback"] = lambda p: pcb(STAGE_DIARIZE, max(0.0, min(1.0, p / 100.0 if p > 1 else p)))
-            diarize_segments = diarize_pipeline(audio, **diarize_kwargs)
+            diarize_segments, speaker_embeddings = diarize_pipeline(audio, **diarize_kwargs)
             result = whisperx.assign_word_speakers(diarize_segments, result)
         except Exception as e:
             log.error("Diarization failed: %s — output will lack speaker labels.", e)
@@ -234,4 +236,14 @@ def transcribe_file(
     out_base = out_dir / audio_path.stem
     write_outputs(result, out_base)
     log.info("Wrote %s.{json,txt,srt}", out_base)
+
+    # Phase-1 auto-ID artifacts for the iMac: embeddings (from diarization) + clips.
+    # Must never fail the transcript itself.
+    if cfg.hf_token:
+        try:
+            from .export_speakers import export_speaker_artifacts
+            export_speaker_artifacts(segments, speaker_embeddings, audio_path, out_dir)
+        except Exception as e:  # noqa: BLE001
+            log.warning("Speaker-artifact export failed for %s: %s", audio_path.name, e)
+
     return out_base.with_suffix(".json")
