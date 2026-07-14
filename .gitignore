@@ -29,3 +29,16 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# Local capture / meeting data — never commit
+transcripts_named/
+local_incoming/
+logs/
+eh/
+.meetings_done
+.local_capture_done
+.g14_pull_last
+.g14_watch.lock
+g14_watch_hidden.vbs
+scripts/diag_*.py
+.claude/

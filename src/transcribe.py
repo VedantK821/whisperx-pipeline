@@ -18,15 +18,14 @@ log = logging.getLogger(__name__)
 
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".opus", ".aac", ".wma", ".mp4", ".mkv", ".webm"}
 
-# Domain vocabulary primer — biases Whisper toward the team's names/products/tools so it
-# stops mis-hearing jargon (e.g. "Micro Insurance" -> "microwave insurance"). Overridable
-# via the INITIAL_PROMPT env var. Kept well under Whisper's ~224-token prompt budget.
+# Domain vocabulary primer — biases Whisper toward your team's names/products/jargon so it
+# stops mis-hearing them (e.g. "Micro Insurance" -> "microwave insurance"). This ships with a
+# generic placeholder; set your own team/product vocabulary via the INITIAL_PROMPT env var.
+# Kept well under Whisper's ~224-token prompt budget.
 DEFAULT_INITIAL_PROMPT = (
-    "Meeting of the acme health-insurance product team in India. "
-    "People: Vedant, Alice, Bob, Morgan, Taylor, Jordan, Sam, Casey, Riley, "
-    "Alex, Priya, Jesse, Robin, Northwind. "
-    "Tools and products: Adobe XD, Figma, Micro Insurance, SafeCare, SafeCare Duo, "
-    "SafeCare Max, Acme Health, Wellsprings, ShieldPlus, personal accident insurance, "
+    "Product team meeting for a health-insurance app. "
+    "People: Alex, Sam, Jordan, Taylor, Morgan, Casey, Riley, Priya, Dev. "
+    "Tools and products: Adobe XD, Figma, micro insurance, personal accident insurance, "
     "telemedicine, sum insured, EMI, premium, policy, brochure, claim."
 )
 

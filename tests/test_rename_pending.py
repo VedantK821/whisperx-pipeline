@@ -21,9 +21,9 @@ def test_finds_transcripts_with_default_labels(tmp_path: Path):
     incoming.mkdir()
 
     _make_transcript(transcripts, "alpha", [{"speaker": "SPEAKER_00", "text": "hi"}])
-    _make_transcript(transcripts, "beta", [{"speaker": "Vedant", "text": "hi"}])
+    _make_transcript(transcripts, "beta", [{"speaker": "Carol", "text": "hi"}])
     _make_transcript(transcripts, "gamma", [
-        {"speaker": "Vedant", "text": "hi"},
+        {"speaker": "Carol", "text": "hi"},
         {"speaker": "SPEAKER_02", "text": "yo"},
     ])
 

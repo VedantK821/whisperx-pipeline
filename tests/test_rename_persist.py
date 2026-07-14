@@ -9,13 +9,13 @@ from src.rename import load_persisted_mapping, save_persisted_mapping
 def test_save_then_load_roundtrip(tmp_path: Path):
     save_persisted_mapping(
         tmp_path, "meeting", "meeting.m4a",
-        {"SPEAKER_00": "Vedant", "SPEAKER_01": "Dave"},
+        {"SPEAKER_00": "Carol", "SPEAKER_01": "Dave"},
     )
     out = tmp_path / "meeting.speakers.json"
     assert out.exists()
 
     loaded = load_persisted_mapping(tmp_path, "meeting")
-    assert loaded == {"SPEAKER_00": "Vedant", "SPEAKER_01": "Dave"}
+    assert loaded == {"SPEAKER_00": "Carol", "SPEAKER_01": "Dave"}
 
 
 def test_save_writes_versioned_schema(tmp_path: Path):

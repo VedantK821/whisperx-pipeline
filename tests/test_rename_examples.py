@@ -69,10 +69,10 @@ def test_apply_speaker_mapping_renames_segments_in_place():
         {"start": 1.0, "end": 2.0, "speaker": "SPEAKER_01", "text": "hello"},
         {"start": 2.0, "end": 3.0, "speaker": "SPEAKER_00", "text": "again"},
     ]
-    apply_speaker_mapping(segments, {"SPEAKER_00": "Vedant"})
-    assert segments[0]["speaker"] == "Vedant"
+    apply_speaker_mapping(segments, {"SPEAKER_00": "Carol"})
+    assert segments[0]["speaker"] == "Carol"
     assert segments[1]["speaker"] == "SPEAKER_01"
-    assert segments[2]["speaker"] == "Vedant"
+    assert segments[2]["speaker"] == "Carol"
 
 
 def test_apply_speaker_mapping_also_renames_word_segments():
@@ -94,7 +94,7 @@ def test_apply_speaker_mapping_also_renames_word_segments():
 def test_unmapped_speakers_finds_default_labels_only():
     segments = [
         {"speaker": "SPEAKER_00"},
-        {"speaker": "Vedant"},
+        {"speaker": "Carol"},
         {"speaker": "SPEAKER_03"},
         {"speaker": "SPEAKER_00"},
         {"speaker": None},
